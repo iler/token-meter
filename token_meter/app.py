@@ -81,6 +81,10 @@ from token_meter.domain.aggregates import (
     spend_log_summaries as _domain_spend_log_summaries,
     spend_projection as _domain_spend_projection,
 )
+from token_meter.domain.builder_recap import (
+    VALID_RECAP_RANGES,
+    build_builder_recap as _domain_build_builder_recap,
+)
 from token_meter.domain.insights import (
     build_cost_insights as _domain_build_cost_insights,
     enrich_insights as _domain_enrich_insights,
@@ -7320,6 +7324,65 @@ def cross_session(sources=None):
     return data
 
 
+def _builder_recap_line_count(value, maximum=(1 << 53) - 1):
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if 0 <= value <= maximum else None
+    if isinstance(value, float):
+        if (math.isfinite(value) and value.is_integer()
+                and 0 <= value <= maximum):
+            return int(value)
+    return None
+
+
+def builder_recap_state(range_key):
+    """Build a privacy-bounded recap from aggregate session and Git evidence."""
+    try:
+        normalized_range = str(range_key).strip()
+        range_days = int(normalized_range)
+    except (TypeError, ValueError):
+        return {"ok": False, "error": "A valid recap range is required."}, 400
+    if normalized_range != str(range_days) or range_days not in VALID_RECAP_RANGES:
+        return {"ok": False, "error": "A valid recap range is required."}, 400
+
+    cross = cross_session()
+    git_state = git_delivery_state("", normalized_range)
+    git_days = None
+    previous_git_lines = None
+    if isinstance(git_state, dict) and git_state.get("ok"):
+        git_days = []
+        for git_day in git_state.get("days") or ():
+            if not isinstance(git_day, dict):
+                continue
+            availability = git_day.get("availability") or {}
+            changed_lines = _builder_recap_line_count(
+                git_day.get("changed_lines"),
+                ((1 << 53) - 1) // max(VALID_RECAP_RANGES),
+            )
+            git_days.append({
+                "day": git_day.get("day"),
+                "available": bool(availability.get("code_pushed")),
+                "active": bool(changed_lines),
+                "changed_lines": changed_lines,
+            })
+        previous_git = git_state.get("previous") or {}
+        previous_availability = previous_git.get("availability") or {}
+        if previous_availability.get("code_pushed") is True:
+            previous_git_lines = _builder_recap_line_count(
+                previous_git.get("changed_lines")
+            )
+    try:
+        payload = _domain_build_builder_recap(
+            _xsess.get("internal_rows") or (), git_days, range_days,
+            generated_at=cross.get("generated_at"),
+            previous_git_lines=previous_git_lines,
+        )
+    except ValueError:
+        return {"ok": False, "error": "A valid recap range is required."}, 400
+    return payload, 200
+
+
 def project_model_stats(project):
     """Return aggregate-only model evidence for one exact discovered project."""
     project = str(project or "")
@@ -9193,6 +9256,23 @@ def page_path():
     return None
 
 
+def performance_page_candidates():
+    return [
+        os.path.join(_SOURCE_ROOT, "performance.html"),
+        os.path.join(os.getcwd(), "performance.html"),
+    ]
+
+
+PERFORMANCE_PAGE_CANDIDATES = performance_page_candidates()
+
+
+def performance_page_path():
+    for path in PERFORMANCE_PAGE_CANDIDATES:
+        if os.path.isfile(path):
+            return path
+    return None
+
+
 def is_dashboard_page_path(req_path):
     return req_path == "/" or bool(re.fullmatch(r"/sessions/[^/]{1,240}/?", req_path or ""))
 
@@ -9260,6 +9340,15 @@ def missing_page_html():
 </html>"""
 
 
+def missing_performance_html():
+    return """<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Token Meter setup error</title></head>
+<body><h1>performance.html is missing</h1>
+<p>Reinstall Token Meter from a complete source checkout.</p></body>
+</html>"""
+
+
 def health_state():
     """Return constant-time liveness/readiness from watcher-owned cached state."""
     path = page_path()
@@ -9304,7 +9393,17 @@ class H(BaseHTTPRequestHandler):
 
     def do_HEAD(self):
         req_path = urlparse(self.path).path
-        if is_dashboard_page_path(req_path):
+        if req_path in ("/performance", "/performance.html"):
+            path = performance_page_path()
+            body = b"" if path else missing_performance_html().encode()
+            self.send_response(200 if path else 503)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(os.path.getsize(path) if path else len(body)))
+            self.send_header("Cache-Control", "no-store, max-age=0")
+            self.send_header("Pragma", "no-cache")
+            self.send_header("Expires", "0")
+            self.end_headers()
+        elif is_dashboard_page_path(req_path):
             path = page_path()
             body = b"" if path else missing_page_html().encode()
             self.send_response(200 if path else 503)
@@ -9499,7 +9598,14 @@ class H(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urlparse(self.path)
         req_path = parsed.path
-        if is_dashboard_page_path(req_path):
+        if req_path in ("/performance", "/performance.html"):
+            path = performance_page_path()
+            if path:
+                with open(path, encoding="utf-8") as performance_file:
+                    self._send(performance_file.read())
+            else:
+                self._send(missing_performance_html(), status=503)
+        elif is_dashboard_page_path(req_path):
             path = page_path()
             if path:
                 self._send(open(path, encoding="utf-8").read())
@@ -9561,6 +9667,15 @@ class H(BaseHTTPRequestHandler):
             status = 200 if payload.get("ok") else (
                 404 if payload.get("error") == "Project was not found." else 400
             )
+            self._send(json.dumps(payload), "application/json", status=status)
+        elif req_path == "/builder-recap":
+            range_values = parse_qs(parsed.query, keep_blank_values=True).get("range") or ["30"]
+            if len(range_values) != 1:
+                payload, status = {
+                    "ok": False, "error": "A valid recap range is required.",
+                }, 400
+            else:
+                payload, status = builder_recap_state(range_values[0])
             self._send(json.dumps(payload), "application/json", status=status)
         elif req_path == "/agent-access/status":
             self._send(json.dumps(agent_access_status()), "application/json")

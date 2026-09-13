@@ -1,5 +1,6 @@
 import unittest
 import datetime
+import http.client
 import json
 import os
 import plistlib
@@ -8,13 +9,1140 @@ import shutil
 import sqlite3
 import subprocess
 import tempfile
+import threading
 import time
+from html.parser import HTMLParser
 from pathlib import Path
 from unittest import mock
 
 import meter
 from token_meter.contracts import DiscoveryContext
 from token_meter.runtimes.codex import CodexRuntimeAdapter
+
+
+class BuilderRecapDomainTests(unittest.TestCase):
+    TODAY = datetime.date(2026, 9, 13)
+
+    def row(self, last, daily=(), **values):
+        return {
+            "last": last,
+            "runtime": "Codex",
+            "duration_s": 0,
+            "duration_available": False,
+            "output_tokens": 0,
+            "availability": {},
+            "_model_daily": list(daily),
+            "_performance_samples": [],
+            "_tool_evidence": {},
+            **values,
+        }
+
+    def recap(self, rows, days=7, git_days=(), previous_git_lines=None):
+        from token_meter.domain.builder_recap import build_builder_recap
+        return build_builder_recap(
+            rows, None if git_days is None else list(git_days), days,
+            today=self.TODAY, generated_at=1_757_718_400,
+            previous_git_lines=previous_git_lines,
+        )
+
+    def supporting(self, result, stat_id):
+        return next(stat for stat in result["supporting"] if stat["id"] == stat_id)
+
+    def spotlight(self, result, stat_id):
+        return next(stat for stat in result["spotlights"] if stat["id"] == stat_id)
+
+    def test_windows_are_inclusive_equal_and_local_calendar_based(self):
+        result = self.recap([], days=7)
+        self.assertEqual(result["current"], {
+            "start_day": "2026-09-07", "end_day": "2026-09-13",
+        })
+        self.assertEqual(result["previous"], {
+            "start_day": "2026-08-31", "end_day": "2026-09-06",
+        })
+        self.assertEqual(len(result["activity_days"]), 7)
+
+    def test_invalid_range_is_rejected_before_aggregation(self):
+        with self.assertRaisesRegex(ValueError, "7, 30, or 90"):
+            self.recap([], days=14)
+
+    def test_30_and_90_day_windows_remain_equal_length_and_inclusive(self):
+        recap_30 = self.recap([], days=30)
+        recap_90 = self.recap([], days=90)
+        self.assertEqual(recap_30["current"], {
+            "start_day": "2026-08-15", "end_day": "2026-09-13",
+        })
+        self.assertEqual(recap_30["previous"], {
+            "start_day": "2026-07-16", "end_day": "2026-08-14",
+        })
+        self.assertEqual(recap_90["current"], {
+            "start_day": "2026-06-16", "end_day": "2026-09-13",
+        })
+        self.assertEqual(recap_90["previous"], {
+            "start_day": "2026-03-18", "end_day": "2026-06-15",
+        })
+
+    def test_core_aggregates_use_day_level_paired_coverage(self):
+        paired = lambda day, output, cost: {
+            "day": day, "model": "gpt-5", "output_tokens": output,
+            "cost_covered_output_tokens": output, "cost_covered_cost": cost,
+        }
+        mixed = {
+            "day": "2026-09-13", "model": "gpt-5", "output_tokens": 900,
+            "cost_covered_output_tokens": 0, "cost_covered_cost": 9,
+        }
+        result = self.recap([
+            self.row("2026-09-13T18:00:00", [
+                paired("2026-09-13", 200, 1), paired("2026-08-31", 100, 1),
+            ]),
+            self.row("2026-09-12T18:00:00", [
+                paired("2026-09-12", 100, 0.5), paired("2026-09-10", 100, 0.5),
+            ]),
+            self.row("2026-09-01T18:00:00", [mixed]),
+        ])
+
+        self.assertEqual(result["activity_days"][-1], {
+            "day": "2026-09-13", "recorded_session": True,
+        })
+        self.assertEqual(self.spotlight(result, "build_streak")["current"], 2)
+        self.assertEqual(self.spotlight(result, "efficiency_change")["current"], 200.0)
+        self.assertEqual(self.spotlight(result, "efficiency_change")["previous"], 100.0)
+        self.assertEqual(self.spotlight(result, "efficiency_change")["delta_pct"], 100.0)
+
+    def test_efficiency_comparison_is_unavailable_with_prior_zero_cost(self):
+        result = self.recap([
+            self.row("2026-09-13T18:00:00", [{
+                "day": "2026-09-13", "model": "gpt-5", "output_tokens": 100,
+                "cost_covered_output_tokens": 100, "cost_covered_cost": 1,
+            }, {
+                "day": "2026-08-31", "model": "gpt-5", "output_tokens": 100,
+                "cost_covered_output_tokens": 100, "cost_covered_cost": 0,
+            }]),
+        ])
+
+        efficiency = self.spotlight(result, "efficiency_change")
+        self.assertFalse(efficiency["available"])
+        self.assertIsNone(efficiency["delta_pct"])
+
+    def test_malformed_non_finite_evidence_is_ignored(self):
+        result = self.recap([self.row("not-a-date", [{
+            "day": "2026-09-13", "model": "gpt-5", "output_tokens": 100,
+            "cost_covered_output_tokens": float("nan"),
+            "cost_covered_cost": float("inf"),
+        }], mtime=float("inf"), _performance_samples=[{
+            "day": "2026-09-13", "output_tokens": float("inf"),
+            "duration_s": float("nan"),
+        }], _tool_evidence={"tools": [{"daily": [{
+            "day": "2026-09-13", "calls": float("inf"),
+        }]}]})])
+
+        self.assertEqual(result["activity_days"][-1], {
+            "day": "2026-09-13", "recorded_session": True,
+        })
+        self.assertFalse(self.spotlight(result, "efficiency_change")["available"])
+        self.assertNotIn("output_pace", [stat["id"] for stat in result["supporting"]])
+        self.assertEqual(result["coverage"]["tools"]["eligible"], 0)
+
+    def test_float_conversion_overflow_is_ignored_as_unavailable_evidence(self):
+        class OverflowingFloat:
+            def __float__(self):
+                raise OverflowError("malformed numeric evidence")
+
+        overflow = OverflowingFloat()
+        result = self.recap([
+            self.row("not-a-date", [], mtime=overflow),
+            self.row("2026-09-13T18:00:00", [{
+                "day": "2026-09-13", "model": "gpt-5",
+                "cost_covered_output_tokens": overflow,
+                "cost_covered_cost": overflow,
+            }]),
+        ])
+
+        self.assertEqual(result["activity_days"][-1], {
+            "day": "2026-09-13", "recorded_session": True,
+        })
+        self.assertFalse(self.spotlight(result, "efficiency_change")["available"])
+
+    def test_git_coverage_requires_explicit_available_evidence_and_counts_only_active_days(self):
+        unavailable = self.recap([], git_days=None)
+        no_measured_rows = self.recap([], git_days=())
+        measured_inactive = self.recap([], git_days=[
+            {"day": f"2026-09-{day:02d}", "available": True, "active": False}
+            for day in range(7, 14)
+        ] + [{"day": "2026-09-12", "available": False, "active": True}])
+
+        self.assertFalse(unavailable["coverage"]["git"]["available"])
+        self.assertFalse(unavailable["coverage"]["git"]["projection_available"])
+        self.assertFalse(no_measured_rows["coverage"]["git"]["available"])
+        self.assertTrue(no_measured_rows["coverage"]["git"]["projection_available"])
+        self.assertEqual(no_measured_rows["coverage"]["git"]["eligible"], 0)
+        self.assertFalse(self.spotlight(no_measured_rows, "lines_pushed")["available"])
+        self.assertNotIn("delivery_active_days", [
+            stat["id"] for stat in no_measured_rows["supporting"]
+        ])
+        self.assertTrue(measured_inactive["coverage"]["git"]["available"])
+        self.assertTrue(measured_inactive["coverage"]["git"]["projection_available"])
+        self.assertEqual(measured_inactive["coverage"]["git"]["eligible"], 7)
+        self.assertEqual(
+            self.supporting(measured_inactive, "delivery_active_days")["current"], 0
+        )
+        delivery = self.supporting(measured_inactive, "delivery_active_days")
+        self.assertIsNone(delivery["previous"])
+        self.assertIsNone(delivery["delta"])
+
+    def test_lines_pushed_sums_only_measured_nonnegative_integer_change_volume(self):
+        result = self.recap([], previous_git_lines=120_000, git_days=[
+            {"day": "2026-09-13", "available": True, "active": True,
+             "changed_lines": 184_392},
+            {"day": "2026-09-12", "available": True, "active": True,
+             "changed_lines": True},
+            {"day": "2026-09-11", "available": True, "active": True,
+             "changed_lines": -1},
+            {"day": "2026-09-10", "available": True, "active": True,
+             "changed_lines": 1.5},
+            {"day": "2026-09-09", "available": True, "active": True,
+             "changed_lines": float("inf")},
+            {"day": "2026-09-08", "available": True, "active": True,
+             "changed_lines": "999999"},
+            {"day": "2026-09-08", "available": True, "active": True,
+             "changed_lines": 10 ** 1000},
+            {"day": "2026-09-07", "available": False, "active": True,
+             "changed_lines": 999_999},
+        ])
+
+        lines = self.spotlight(result, "lines_pushed")
+        self.assertTrue(lines["available"])
+        self.assertEqual(lines["current"], 184_392)
+        self.assertEqual(lines["previous"], 120_000)
+        self.assertEqual(lines["delta"], 64_392)
+        self.assertAlmostEqual(lines["delta_pct"], 53.66, places=2)
+        self.assertEqual(lines["unit"], "lines")
+        self.assertEqual(
+            lines["basis"],
+            "added plus deleted text lines from successful local pushes",
+        )
+        self.assertEqual(lines["sample_count"], 1)
+
+    def test_public_labels_reject_paths_urls_controls_and_credentialish_values(self):
+        sentinels = ("/private/repo", "https://secret.example", "sk-live-secret",
+                     "api_key=secret", "builder@example.com", "<private>", "bad\x00label",
+                     "Untrusted runtime narrative", "Untrusted model narrative",
+                     "Please upload your credentials")
+        result = self.recap([
+            self.row("2026-09-13T18:00:00", [{
+                "day": "2026-09-13", "model": sentinels[0], "executions": 9,
+            }, {
+                "day": "2026-09-12", "model": "gpt-5.2-codex", "executions": 3,
+            }], runtime=sentinels[1], _tool_evidence={"tools": [
+                {"name": "read_file", "display": sentinels[2], "daily": [{
+                    "day": "2026-09-13", "calls": 9,
+                }]},
+                {"name": "read_file", "display": sentinels[9], "daily": [{
+                    "day": "2026-09-12", "calls": 3,
+                }]},
+            ]}),
+            self.row("2026-09-13T17:00:00", [{
+                "day": "2026-09-13", "model": sentinels[3], "executions": 9,
+            }], runtime=sentinels[4]),
+            self.row("2026-09-13T16:00:00", [{
+                "day": "2026-09-13", "model": sentinels[5], "executions": 9,
+            }], runtime=sentinels[6]),
+            self.row("2026-09-11T16:00:00", [{
+                "day": "2026-09-11", "model": "gpt-5.2-codex", "executions": 3,
+            }], runtime="Codex"),
+            self.row("2026-09-10T16:00:00", [{
+                "day": "2026-09-10", "model": sentinels[8], "executions": 3,
+            }], runtime=sentinels[7]),
+        ])
+
+        payload = json.dumps(result, sort_keys=True)
+        for sentinel in sentinels:
+            self.assertNotIn(sentinel, payload)
+        self.assertIn("gpt-5.2-codex", payload)
+        self.assertIn("Read file", payload)
+
+    def test_public_model_projection_rejects_project_like_identifiers(self):
+        private_models = (
+            "customer-acme-project", "project-alpha", "repo-token-meter",
+            "workspace-client-a", "internal-app", "my-secret-build",
+            "gpt-5.6-customer-acme-project", "claude-project-alpha",
+            "gpt5customer", "qwen3customer", "llama3project",
+            "gemma3tenant", "starcoder2internal", "gpt5acme",
+        )
+        daily = [{
+            "day": "2026-09-13", "model": model, "executions": 9,
+        } for model in private_models]
+        daily.append({
+            "day": "2026-09-13", "model": "gpt-5.6-sol", "executions": 3,
+        })
+
+        result = self.recap([
+            self.row("2026-09-13T18:00:00", daily, runtime="Codex"),
+        ])
+
+        payload = json.dumps(result, sort_keys=True)
+        for model in private_models:
+            self.assertNotIn(model, payload)
+        self.assertIn("gpt-5.6-sol", payload)
+
+    def test_public_model_projection_preserves_versioned_family_labels(self):
+        public_models = (
+            "qwen3-coder", "starcoder2", "llama3.3", "gemma3",
+            "deepseek-v3", "o3", "claude-sonnet-4-6", "gpt-5.6-sol",
+        )
+        result = self.recap([
+            self.row("2026-09-13T18:00:00", [{
+                "day": "2026-09-13", "model": model, "executions": 1,
+            } for model in public_models], runtime="Codex"),
+        ])
+
+        self.assertEqual(
+            {row["model"] for row in result["stack"]["models"]},
+            set(public_models),
+        )
+
+    def test_output_pace_models_and_dated_tools_are_aggregated_by_period(self):
+        result = self.recap([
+            self.row("2026-09-13T18:00:00", [{
+                "day": "2026-09-13", "model": "gpt-5.5",
+            }], runtime="Codex", _performance_samples=[{
+                "day": "2026-09-13", "output_tokens": 300, "duration_s": 30,
+            }, {
+                "day": "2026-08-31", "output_tokens": 100, "duration_s": 20,
+            }], _tool_evidence={"tools": [{"name": "read_file", "display": "Read file", "daily": [{
+                "day": "2026-09-13", "calls": 4,
+            }, {"day": "2026-08-31", "calls": 2}]}]}),
+            self.row("2026-09-12T18:00:00", [{
+                "day": "2026-09-12", "model": "gpt-5.5",
+            }], runtime="Claude"),
+        ])
+
+        pace = self.supporting(result, "output_pace")
+        self.assertEqual(pace["current"], 10.0)
+        self.assertEqual(pace["previous"], 5.0)
+        self.assertEqual(pace["delta_pct"], 100.0)
+        self.assertEqual(result["stack"]["models"], [
+            {"runtime": "Claude", "model": "gpt-5.5"},
+            {"runtime": "Codex", "model": "gpt-5.5"},
+        ])
+        self.assertEqual(result["coverage"]["tools"]["eligible"], 1)
+
+    def test_usage_rankings_are_capped_scoped_and_private(self):
+        rows = []
+        fixtures = [
+            ("Codex", "gpt-5.3-codex", (4, 3, 2, 1)),
+            ("Claude", "gpt-5.5", (3, 2, 1)),
+            ("Cursor", "cursor-small", (2, 2)),
+            ("OpenCode", "gpt-5.5", (3,)),
+        ]
+        serial = 0
+        for runtime, model, executions in fixtures:
+            for count in executions:
+                serial += 1
+                day = 13 - ((serial - 1) % 7)
+                rows.append(self.row(
+                    f"2026-09-{day:02d}T12:00:00",
+                    [{"day": f"2026-09-{day:02d}", "model": model,
+                      "executions": count}],
+                    id=f"private-session-{serial}", runtime=runtime,
+                ))
+
+        result = self.recap(rows)
+
+        self.assertEqual(result["usage"]["agents"], [
+            {"label": "Codex", "count": 4, "share": 40.0},
+            {"label": "Claude", "count": 3, "share": 30.0},
+            {"label": "Cursor", "count": 2, "share": 20.0},
+        ])
+        self.assertEqual(result["usage"]["models"], [
+            {"label": "gpt-5.3-codex", "runtime": "Codex",
+             "count": 10, "share": 43.47826086956522},
+            {"label": "gpt-5.5", "runtime": "Claude",
+             "count": 6, "share": 26.08695652173913},
+            {"label": "cursor-small", "runtime": "Cursor",
+             "count": 4, "share": 17.391304347826086},
+        ])
+        serialized = json.dumps(result["usage"], sort_keys=True)
+        self.assertNotIn("private-session", serialized)
+        self.assertNotIn("OpenCode", serialized)
+
+    def test_spotlight_eligibility_uses_safe_period_evidence(self):
+        def daily(day, model, executions=1, output=0, cost=0):
+            return {"day": day, "model": model, "executions": executions,
+                    "output_tokens": output, "cost_covered_output_tokens": output,
+                    "cost_covered_cost": cost}
+
+        result = self.recap([
+            self.row("2026-09-13T18:00:00", [
+                daily("2026-09-13", "gpt-5", 5, 900, 3),
+                daily("2026-09-12", "gpt-5", 2, 100, 1),
+            ], id="session-secret", runtime="Codex", duration_s=50,
+                wall_duration_s=9_999, duration_available=True,
+                _performance_samples=[
+                    {"day": "2026-09-13", "model": "gpt-5", "output_tokens": 600, "generation_s": 30},
+                    {"day": "2026-09-12", "model": "gpt-5", "output_tokens": 500, "generation_s": 20},
+                    {"day": "2026-09-11", "model": "gpt-5", "output_tokens": 400, "generation_s": 10},
+                ], _tool_evidence={"tools": [
+                    {"name": "read_file", "display": "Read file", "daily": [{"day": "2026-09-13", "calls": 8}]},
+                    {"name": "Token Meter diagnostics", "daily": [{"day": "2026-09-13", "calls": 99}]},
+                ]}),
+            self.row("2026-09-13T17:00:00", [daily("2026-09-13", "claude", 5, 600, 3)],
+                id="codex-second", runtime="Codex", duration_s=10, duration_available=True),
+            self.row("2026-09-12T17:00:00", [daily("2026-09-12", "claude", 5, 600, 3)],
+                id="claude-first", runtime="Claude", duration_s=20, duration_available=True),
+            self.row("2026-09-11T17:00:00", [daily("2026-09-11", "unknown-model", 9)],
+                id="claude-second", runtime="unknown", duration_s=30, duration_available=False,
+                wall_duration_s=10_000),
+            self.row("2026-09-10T17:00:00", [daily("2026-09-10", "unknown", 9)],
+                runtime="unknown", id="unknown-session"),
+        ])
+
+        self.assertEqual({row["id"] for row in result["spotlights"]}, {
+            "efficiency_record", "efficiency_change", "marathon_session",
+            "speed_champion", "build_streak", "daily_driver", "go_to_model",
+            "lines_pushed", "biggest_build", "tool_mvp", "stack_explorer",
+        })
+        self.assertEqual(self.spotlight(result, "marathon_session")["current"], 50)
+        self.assertEqual(self.spotlight(result, "speed_champion")["current"], 25.0)
+        self.assertEqual(self.spotlight(result, "speed_champion")["leaders"], [
+            {"runtime": "Codex", "model": "gpt-5"},
+        ])
+        self.assertEqual(self.spotlight(result, "daily_driver")["leaders"], [
+            {"runtime": "Codex"},
+        ])
+        self.assertEqual(self.spotlight(result, "go_to_model")["leaders"], [
+            {"runtime": "Codex", "model": "gpt-5"},
+        ])
+        biggest = self.spotlight(result, "biggest_build")
+        self.assertEqual(biggest["current"], 1_000)
+        self.assertEqual(biggest["leaders"], [{"runtime": "Codex"}])
+        self.assertEqual(self.spotlight(result, "tool_mvp")["leaders"], [
+            {"tool": "Read file"},
+        ])
+        self.assertEqual(self.spotlight(result, "stack_explorer")["current"], 5)
+
+    def test_record_ties_and_auto_selection_follow_the_contract(self):
+        def paired(day, output, cost):
+            return {"day": day, "model": "gpt-5", "executions": 1,
+                    "cost_covered_output_tokens": output, "cost_covered_cost": cost}
+
+        record_rows = [self.row("2026-09-13T12:00:00", [paired("2026-09-13", 400, 1)])]
+        for day in ("2026-09-06", "2026-08-30", "2026-08-23"):
+            record_rows[0]["_model_daily"].append(paired(day, 100, 1))
+        record_result = self.recap(record_rows)
+        self.assertTrue(self.spotlight(record_result, "efficiency_record")["available"])
+        self.assertEqual(record_result["spotlight_default"], "efficiency_change")
+
+        tied = self.recap([
+            self.row("2026-09-13T12:00:00", id="a", runtime="Codex"),
+            self.row("2026-09-12T12:00:00", id="b", runtime="Claude"),
+        ])
+        self.assertEqual(self.spotlight(tied, "daily_driver")["leaders"], [
+            {"runtime": "Claude"}, {"runtime": "Codex"},
+        ])
+        three_way = self.recap([
+            self.row("2026-09-13T12:00:00", id="a", runtime="Codex"),
+            self.row("2026-09-12T12:00:00", id="b", runtime="Claude"),
+            self.row("2026-09-11T12:00:00", id="c", runtime="Cursor"),
+        ])
+        self.assertFalse(self.spotlight(three_way, "daily_driver")["available"])
+
+        tied_record = self.recap([self.row("2026-09-13T12:00:00", [
+            paired("2026-09-13", 100, 1), paired("2026-09-06", 100, 1),
+            paired("2026-08-30", 50, 1), paired("2026-08-23", 50, 1),
+        ])])
+        self.assertFalse(self.spotlight(tied_record, "efficiency_record")["available"])
+
+        streak_result = self.recap([
+            self.row("2026-09-13T12:00:00", id="a"),
+            self.row("2026-09-12T12:00:00", id="b"),
+        ])
+        self.assertEqual(streak_result["spotlight_default"], "build_streak")
+        self.assertIsNone(self.recap([])["spotlight_default"])
+
+    def test_public_recap_is_a_recursive_privacy_allowlist(self):
+        def recursive_keys(value, path=()):
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    yield path + (key,)
+                    yield from recursive_keys(item, path + (key,))
+            elif isinstance(value, list):
+                for item in value:
+                    yield from recursive_keys(item, path + ("*",))
+
+        result = self.recap([self.row("2026-09-13T12:00:00", [{
+            "day": "2026-09-13", "model": "gpt-5", "executions": 1,
+            "cost_covered_output_tokens": 100, "cost_covered_cost": 1,
+            "path": "/private/repo", "project": "SECRET_PROMPT",
+        }], id="session-secret", path="/private/repo", project="SECRET_PROMPT",
+            title="commit subject", session_name="session-secret",
+            desktop_session_id="session-secret", args_fingerprint="tool result secret",
+            raw_error="tool result secret", _tool_evidence={"tools": [{
+                "name": "read_file", "id": "tool-secret", "args_fingerprint": "tool result secret",
+                "daily": [{"day": "2026-09-13", "calls": 1, "raw_error": "tool result secret"}],
+            }]} )])
+        forbidden = {"path", "project", "title", "session_name", "desktop_session_id",
+                     "args_fingerprint", "raw_error"}
+        for path in recursive_keys(result):
+            self.assertNotIn(path[-1], forbidden)
+            if path[-1] == "id":
+                self.assertIn(path[:-1], {("spotlights", "*"), ("supporting", "*")})
+        payload = json.dumps(result, sort_keys=True)
+        for sentinel in ("SECRET_PROMPT", "/private/repo", "session-secret",
+                         "commit subject", "tool result secret"):
+            self.assertNotIn(sentinel, payload)
+
+    def test_tool_mvp_excludes_token_meter_mcp_and_projects_safe_display(self):
+        result = self.recap([self.row("2026-09-13T12:00:00", [], _tool_evidence={
+            "tools": [{
+                "name": "mcp__tokenmeter__diagnose", "display": "diagnose",
+                "namespace": "tokenmeter", "kind": "mcp",
+                "daily": [{"day": "2026-09-13", "calls": 99}],
+            }, {
+                "name": "read_file_v2", "display": "Read file", "namespace": "filesystem",
+                "kind": "tool", "daily": [{"day": "2026-09-13", "calls": 3}],
+            }, {
+                "name": "secret", "display": "Read file", "daily": [{"day": "2026-09-13", "calls": 99}],
+            }, {
+                "name": "password", "display": "Read file", "daily": [{"day": "2026-09-13", "calls": 99}],
+            }, {
+                "name": "authorization", "display": "Read file", "daily": [{"day": "2026-09-13", "calls": 99}],
+            }, {
+                "name": "access_token", "display": "Read file", "daily": [{"day": "2026-09-13", "calls": 99}],
+            }, {
+                "name": "mcp__safe__access_token", "display": "Read file", "daily": [{"day": "2026-09-13", "calls": 99}],
+            }],
+        })])
+
+        tool = self.spotlight(result, "tool_mvp")
+        self.assertTrue(tool["available"])
+        self.assertEqual(tool["leaders"], [{"tool": "Read file"}])
+        self.assertEqual(result["coverage"]["tools"]["eligible"], 1)
+        payload = json.dumps(result, sort_keys=True)
+        for sentinel in ("mcp__tokenmeter__diagnose", "read_file_v2", "Secret", "Password",
+                         "Authorization", "Access token"):
+            self.assertNotIn(sentinel, payload)
+
+    def test_tool_mvp_projects_unknown_provider_identifiers_to_fixed_generic_labels(self):
+        private_names = (
+            "mcp__repo__private-project-alpha",
+            "mcp__workspace__customer_acme",
+            "git_private_repo",
+        )
+        result = self.recap([self.row("2026-09-13T12:00:00", [], _tool_evidence={
+            "tools": [
+                {"name": "read_file_v2", "display": "untrusted display", "daily": [
+                    {"day": "2026-09-13", "calls": 5},
+                ]},
+                *[{"name": name, "display": "untrusted display", "daily": [
+                    {"day": "2026-09-13", "calls": 1},
+                ]} for name in private_names],
+            ],
+        })])
+
+        self.assertEqual(self.spotlight(result, "tool_mvp")["leaders"], [{"tool": "Read file"}])
+        self.assertEqual(self.spotlight(result, "tool_mvp")["current"], 5)
+        self.assertEqual(result["coverage"]["tools"]["eligible"], 3)
+        payload = json.dumps(result, sort_keys=True)
+        for private_name in private_names:
+            self.assertNotIn(private_name, payload)
+        for fragment in ("private-project-alpha", "customer_acme", "private repo"):
+            self.assertNotIn(fragment, payload)
+
+
+class BuilderRecapEndpointTests(unittest.TestCase):
+    def setUp(self):
+        self.saved_cache = dict(meter._xsess)
+
+    def tearDown(self):
+        meter._xsess.clear()
+        meter._xsess.update(self.saved_cache)
+
+    def test_builder_recap_state_reduces_git_evidence_before_public_build(self):
+        expected = {"ok": True, "generated_at": 123, "privacy": {
+            "content_included": False, "project_identity_included": False,
+        }}
+        meter._xsess["internal_rows"] = [{"id": "private"}]
+        with mock.patch.object(meter, "cross_session", return_value={"generated_at": 123}), \
+                mock.patch.object(meter, "git_delivery_state", return_value={
+                    "ok": True,
+                    "previous": {
+                        "changed_lines": 8,
+                        "availability": {"code_pushed": True},
+                        "project": "/private/previous", "subject": "secret previous",
+                    },
+                    "days": [{
+                        "day": "2026-09-13", "changed_lines": 12,
+                        "availability": {"code_pushed": True},
+                        "project": "/private/repo", "subject": "secret",
+                    }],
+                }), \
+                mock.patch.object(meter, "_domain_build_builder_recap", return_value=expected) as build:
+            payload, status = meter.builder_recap_state("30")
+
+        self.assertEqual(status, 200)
+        self.assertEqual(payload, expected)
+        build.assert_called_once()
+        self.assertEqual(build.call_args.args[0], [{"id": "private"}])
+        self.assertEqual(build.call_args.args[1], [{
+            "day": "2026-09-13", "available": True, "active": True,
+            "changed_lines": 12,
+        }])
+        self.assertEqual(build.call_args.args[2], 30)
+        self.assertEqual(build.call_args.kwargs["generated_at"], 123)
+        self.assertEqual(build.call_args.kwargs["previous_git_lines"], 8)
+        self.assertNotIn("/private/repo", json.dumps(build.call_args.args[1]))
+        self.assertNotIn("secret", json.dumps(build.call_args.args[1]))
+        self.assertNotIn("private/previous", json.dumps(build.call_args.kwargs))
+
+    def test_builder_recap_state_fails_closed_on_malformed_changed_line_counts(self):
+        meter._xsess["internal_rows"] = []
+        malformed = (True, -1, 1.5, float("inf"), "999", 10 ** 1000)
+        days = [{
+            "day": f"2026-09-{13 - index:02d}", "changed_lines": value,
+            "availability": {"code_pushed": True},
+        } for index, value in enumerate(malformed)]
+        with mock.patch.object(meter, "cross_session", return_value={"generated_at": 123}), \
+                mock.patch.object(meter, "git_delivery_state", return_value={
+                    "ok": True, "days": days,
+                    "previous": {
+                        "changed_lines": "999",
+                        "availability": {"code_pushed": True},
+                    },
+                }), \
+                mock.patch.object(meter, "_domain_build_builder_recap", return_value={"ok": True}) as build:
+            payload, status = meter.builder_recap_state("30")
+
+        self.assertEqual((payload, status), ({"ok": True}, 200))
+        projected = build.call_args.args[1]
+        self.assertEqual(len(projected), len(malformed))
+        self.assertTrue(all(row["changed_lines"] is None for row in projected))
+        self.assertIsNone(build.call_args.kwargs["previous_git_lines"])
+
+    def test_builder_recap_state_marks_git_failures_unavailable(self):
+        meter._xsess["internal_rows"] = [{"id": "private"}]
+        with mock.patch.object(meter, "cross_session", return_value={"generated_at": 123}), \
+                mock.patch.object(meter, "git_delivery_state", return_value={
+                    "ok": False, "error": "private git failure",
+                }), \
+                mock.patch.object(meter, "_domain_build_builder_recap", return_value={"ok": True}) as build:
+            payload, status = meter.builder_recap_state("7")
+
+        self.assertEqual((payload, status), ({"ok": True}, 200))
+        self.assertIsNone(build.call_args.args[1])
+
+    def test_builder_recap_state_rejects_invalid_ranges_without_discovery(self):
+        for value in ("", "14", "30.0", "seven"):
+            with self.subTest(value=value), \
+                    mock.patch.object(meter, "cross_session") as cross, \
+                    mock.patch.object(meter, "git_delivery_state") as git, \
+                    mock.patch.object(meter, "_domain_build_builder_recap") as build:
+                payload, status = meter.builder_recap_state(value)
+            self.assertEqual(status, 400)
+            self.assertEqual(payload, {
+                "ok": False, "error": "A valid recap range is required.",
+            })
+            cross.assert_not_called()
+            git.assert_not_called()
+            build.assert_not_called()
+
+    def request(self, path):
+        server = meter.TokenMeterHTTPServer(("127.0.0.1", 0), meter.H)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            conn = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=5)
+            conn.request("GET", path)
+            response = conn.getresponse()
+            payload = json.loads(response.read())
+            status = response.status
+            content_type = response.getheader("Content-Type")
+            conn.close()
+            return payload, status, content_type
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+    def test_builder_recap_http_route_defaults_validates_and_returns_json(self):
+        meter._xsess["internal_rows"] = [{
+            "id": "private-session", "path": "/private/trace.jsonl",
+            "project": "/private/repo", "title": "private title",
+            "last": "2026-09-13T12:00:00", "runtime": "Codex",
+        }]
+        with mock.patch.object(meter, "cross_session", return_value={"generated_at": 123}) as cross, \
+                mock.patch.object(meter, "git_delivery_state", return_value={"ok": True, "days": []}) as git:
+            valid, valid_status, valid_type = self.request("/builder-recap?range=7")
+            default, default_status, _ = self.request("/builder-recap")
+            invalid, invalid_status, _ = self.request("/builder-recap?range=14")
+            repeated, repeated_status, _ = self.request("/builder-recap?range=7&range=30")
+            cross.reset_mock()
+            git.reset_mock()
+            blanks = [
+                self.request("/builder-recap?range="),
+                self.request("/builder-recap?range=7&range="),
+                self.request("/builder-recap?range=&range=30"),
+            ]
+
+        self.assertEqual((valid_status, valid_type), (200, "application/json"))
+        self.assertEqual(valid["range_days"], 7)
+        self.assertEqual(valid["privacy"], {
+            "content_included": False, "project_identity_included": False,
+        })
+        for sentinel in ("private-session", "/private/trace.jsonl", "/private/repo", "private title"):
+            self.assertNotIn(sentinel, json.dumps(valid, sort_keys=True))
+        self.assertEqual((default_status, default["range_days"]), (200, 30))
+        for payload, status in ((invalid, invalid_status), (repeated, repeated_status)):
+            self.assertEqual(status, 400)
+            self.assertEqual(payload, {
+                "ok": False, "error": "A valid recap range is required.",
+            })
+            self.assertNotIn("private", json.dumps(payload))
+        for payload, status, _ in blanks:
+            self.assertEqual(status, 400)
+            self.assertEqual(payload, {
+                "ok": False, "error": "A valid recap range is required.",
+            })
+        cross.assert_not_called()
+        git.assert_not_called()
+
+        source = Path(meter.IMPLEMENTATION_FILE).read_text()
+        self.assertIn('elif req_path == "/builder-recap":', source)
+        self.assertIn("builder_recap_state(range_values[0])", source)
+        post_source = source[source.index("def do_POST"):source.index("def do_GET")]
+        self.assertNotIn('req_path == "/builder-recap"', post_source)
+
+    def test_builder_recap_http_payload_rejects_unsafe_runtime_model_and_tool_labels(self):
+        sentinels = ("https://private.example", "/private/model", "sk-live-secret",
+                     "api_key=private", "<private-label>")
+        meter._xsess["internal_rows"] = [{
+            "last": "2026-09-13T12:00:00", "runtime": sentinels[0],
+            "_model_daily": [{"day": "2026-09-13", "model": sentinels[1], "executions": 3}],
+            "_performance_samples": [{"day": "2026-09-13", "model": sentinels[2],
+                                      "output_tokens": 1000, "duration_s": 10}],
+            "_tool_evidence": {"tools": [{"name": "read_file", "display": sentinels[3],
+                                              "daily": [{"day": "2026-09-13", "calls": 2}]},
+                                             {"name": "read_file", "display": sentinels[4],
+                                              "daily": [{"day": "2026-09-13", "calls": 2}]}]},
+        }]
+        with mock.patch.object(meter, "cross_session", return_value={"generated_at": 123}), \
+                mock.patch.object(meter, "git_delivery_state", return_value={"ok": True, "days": []}):
+            payload, status, _ = self.request("/builder-recap?range=7")
+
+        self.assertEqual(status, 200)
+        serialized = json.dumps(payload, sort_keys=True)
+        for sentinel in sentinels:
+            self.assertNotIn(sentinel, serialized)
+
+
+class BuilderRecapStandalonePageTests(unittest.TestCase):
+    def request(self, method, path):
+        server = meter.TokenMeterHTTPServer(("127.0.0.1", 0), meter.H)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            conn = http.client.HTTPConnection(
+                "127.0.0.1", server.server_port, timeout=5,
+            )
+            conn.request(method, path)
+            response = conn.getresponse()
+            body = response.read()
+            result = {
+                "status": response.status,
+                "type": response.getheader("Content-Type"),
+                "length": response.getheader("Content-Length"),
+                "cache": response.getheader("Cache-Control"),
+                "body": body,
+            }
+            conn.close()
+            return result
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+    def test_performance_document_routes_and_manifest(self):
+        manifest = Path(meter.__file__).with_name("runtime-manifest.txt").read_text()
+        self.assertIn("required performance.html", manifest.splitlines())
+
+        with tempfile.TemporaryDirectory() as tmp:
+            page = Path(tmp) / "performance.html"
+            page.write_text("<!doctype html><title>Builder recap</title>")
+            with mock.patch.object(
+                    meter, "performance_page_path", return_value=str(page),
+                    create=True):
+                direct = self.request("GET", "/performance")
+                alias = self.request("GET", "/performance.html")
+                head = self.request("HEAD", "/performance")
+
+            for response in (direct, alias):
+                self.assertEqual(response["status"], 200)
+                self.assertEqual(response["type"], "text/html; charset=utf-8")
+                self.assertEqual(response["cache"], "no-store, max-age=0")
+                self.assertEqual(response["body"], page.read_bytes())
+            self.assertEqual(head["status"], 200)
+            self.assertEqual(head["body"], b"")
+            self.assertEqual(head["length"], str(page.stat().st_size))
+            self.assertEqual(head["cache"], "no-store, max-age=0")
+
+            with mock.patch.object(
+                    meter, "performance_page_path", return_value=None,
+                    create=True):
+                missing = self.request("GET", "/performance")
+            self.assertEqual(missing["status"], 503)
+            self.assertIn(b"performance.html is missing", missing["body"])
+            self.assertNotIn(str(tmp).encode(), missing["body"])
+
+    def test_standalone_studio_has_the_approved_controls_and_no_remote_assets(self):
+        page_path = Path(meter.__file__).with_name("performance.html")
+        self.assertTrue(page_path.is_file())
+        page = page_path.read_text()
+        for marker in (
+            'href="/#efficiency"', 'id=range-controls', 'data-range=7',
+            'data-range=30', 'data-range=90',
+            '<span>Name</span><input id=builder-name maxlength=40',
+            'id=include-usage type=checkbox', 'id=reset type=button',
+            'id=retry type=button hidden',
+            'id=download type=button disabled>Download PNG</button>',
+            'id=poster width=1080 height=1350 role=img',
+            'id=status role=status aria-live=polite',
+            'function drawBuilderRecap(', 'function loadRecap(',
+            '/builder-recap?range=', 'github.com/splunk/token-meter',
+            '@media(max-width:1024px)',
+        ):
+            self.assertIn(marker, page)
+        self.assertEqual(page.count("function drawBuilderRecap("), 1)
+        self.assertNotRegex(page, r'<(?:script|img|link)[^>]+(?:src|href)=["\']https?://')
+        self.assertNotIn("foreignObject", page)
+        self.assertNotIn("localStorage", page)
+        self.assertNotIn("Display name", page)
+        self.assertNotIn("id=spotlight", page)
+        self.assertNotIn("id=include-git", page)
+
+    def test_standalone_studio_uses_the_spectrum_shell_and_compact_editor(self):
+        class MarkupInventory(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.body_classes = set()
+                self.by_id = {}
+
+            def handle_starttag(self, tag, attrs):
+                attributes = dict(attrs)
+                if tag == "body":
+                    self.body_classes.update(attributes.get("class", "").split())
+                if attributes.get("id"):
+                    self.by_id[attributes["id"]] = (tag, attributes)
+
+        page = Path(meter.__file__).with_name("performance.html").read_text()
+        markup = MarkupInventory()
+        markup.feed(page)
+
+        self.assertTrue({"spectrumApp", "performanceApp"}.issubset(markup.body_classes))
+        self.assertEqual(markup.by_id["performance-rail"][0], "aside")
+        self.assertEqual(
+            markup.by_id["performance-rail"][1]["aria-label"],
+            "Token Meter navigation",
+        )
+        self.assertEqual(markup.by_id["performance-navigation"][0], "nav")
+        performance = markup.by_id["tab-performance"]
+        self.assertEqual(performance[0], "a")
+        self.assertEqual(performance[1]["href"], "/performance")
+        self.assertEqual(performance[1]["aria-current"], "page")
+        self.assertEqual(markup.by_id["performance-surface"][0], "main")
+        self.assertEqual(markup.by_id["performance-header"][0], "header")
+        self.assertIn("<title>Token Meter — Performance card</title>", page)
+        self.assertIn("<h1>Performance card</h1>", page)
+        self.assertIn("<span class=railLabel>Performance</span>", page)
+        self.assertNotIn("headerMeta", page)
+        self.assertNotIn("<strong>4:5</strong>", page)
+        self.assertEqual(markup.by_id["performance-controls"][0], "section")
+        self.assertEqual(
+            markup.by_id["performance-controls"][1]["aria-label"],
+            "Performance controls",
+        )
+        self.assertEqual(markup.by_id["performance-preview"][0], "section")
+        self.assertIn("<div class=studioWorkspace>", page)
+        workspace_start = page.index("<div class=studioWorkspace>")
+        controls_start = page.index(
+            "<section class=controlDock id=performance-controls",
+        )
+        preview_start = page.index(
+            "<section class=stage id=performance-preview",
+        )
+        self.assertLess(workspace_start, controls_start)
+        self.assertLess(controls_start, preview_start)
+        self.assertIn(
+            ".studioWorkspace{display:grid;grid-template-columns:220px minmax(0,1fr)",
+            page,
+        )
+        self.assertNotIn("evidence-note", markup.by_id)
+        self.assertEqual(markup.by_id["status"][1]["role"], "status")
+        primary = page.split("<div class=railPrimary>", 1)[1].split("</div>", 1)[0]
+        self.assertLess(primary.index('href="/#efficiency"'), primary.index('href="/#git"'))
+        self.assertLess(primary.index('href="/#git"'), primary.index("id=tab-performance"))
+        self.assertNotIn("Make it yours.", page)
+        self.assertNotIn("Builder Recap Studio", page)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for canvas verification")
+    def test_standalone_canvas_omits_longest_session_and_ghost_period(self):
+        page_path = Path(meter.__file__).with_name("performance.html")
+        script = f"""
+const fs=require('fs'),page=fs.readFileSync({json.dumps(str(page_path))},'utf8');
+function extract(name){{let start=page.indexOf(`function ${{name}}(`);if(start<0)throw Error(`missing ${{name}}`);let i=page.indexOf('{{',start),depth=0;for(;i<page.length;i++){{if(page[i]==='{{')depth++;else if(page[i]==='}}'&&--depth===0)return page.slice(start,i+1);}}throw Error(`unclosed ${{name}}`);}}
+for(const name of ['safeArray','sanitizeBuilderName','compactNumber','durationLabel','formatStat','ellipsize','fitText','supportingStats','drawUsageGroup','drawBuilderRecap'])eval(extract(name));
+class Context{{constructor(){{this.ops=[];this.font='';}}fillRect(...v){{this.ops.push(['rect',this.fillStyle,...v]);}}fillText(...v){{this.ops.push(['text',String(v[0]),...v.slice(1),this.font]);}}measureText(v){{return {{width:String(v).length*16}};}}beginPath(){{}}arc(){{}}stroke(){{}}save(){{}}restore(){{}}translate(){{}}rotate(){{}}}}
+class Canvas{{constructor(){{this.ctx=new Context();this.attrs={{}};}}getContext(){{return this.ctx;}}setAttribute(k,v){{this.attrs[k]=String(v);}}}}
+const payload={{range_days:30,current:{{end_day:'2026-09-13'}},spotlights:[
+ {{id:'lines_pushed',available:true,current:184392,unit:'lines'}},
+ {{id:'efficiency_change',label:'Output efficiency',available:true,current:2680,unit:'output tokens/$'}},
+ {{id:'speed_champion',label:'Fastest model',available:true,current:42.8,unit:'output tokens/s',leaders:[{{model:'gpt-5.3'}}]}},
+ {{id:'marathon_session',label:'Longest session',available:true,current:24120,unit:'seconds'}},
+ {{id:'build_streak',available:true,current:14,unit:'days'}}
+],supporting:[{{id:'sessions',label:'AI coding sessions',available:true,current:126,unit:'sessions'}}],activity_days:Array.from({{length:30}},(_,i)=>({{recorded_session:i<24}})),usage:{{agents:[],models:[]}}}};
+const canvas=new Canvas();drawBuilderRecap(canvas,payload,{{name:'Ada Builder',includeUsage:true}});
+const textOps=canvas.ctx.ops.filter(op=>op[0]==='text');
+const missingPayload=JSON.parse(JSON.stringify(payload));missingPayload.supporting=[];const missingCanvas=new Canvas();drawBuilderRecap(missingCanvas,missingPayload,{{name:'',includeUsage:true}});const missingSessionValue=missingCanvas.ctx.ops.find(op=>op[0]==='text'&&op[2]===774&&op[3]===808);
+const unavailableSpeedPayload=JSON.parse(JSON.stringify(payload));unavailableSpeedPayload.spotlights.find(stat=>stat.id==='speed_champion').available=false;const unavailableSpeedCanvas=new Canvas();drawBuilderRecap(unavailableSpeedCanvas,unavailableSpeedPayload,{{name:'',includeUsage:true}});const unavailableSpeedValue=unavailableSpeedCanvas.ctx.ops.find(op=>op[0]==='text'&&op[2]===544&&op[3]===808);
+console.log(JSON.stringify({{texts:textOps.map(op=>op[1]),labels:textOps.filter(op=>op[3]===840).map(op=>[op[1],op[2]]),ghost:textOps.filter(op=>String(op[4]).includes('330px')),aria:canvas.attrs['aria-label'],missingAria:missingCanvas.attrs['aria-label'],missingSessionValue,unavailableSpeedValue}}));
+"""
+        result = subprocess.run(
+            ["node", "-e", script], capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rendered = json.loads(result.stdout)
+        self.assertEqual(rendered["labels"], [
+            ["ACTIVE DAYS", 72], ["OUTPUT EFFICIENCY", 314],
+            ["FASTEST MODEL", 544], ["AI SESSIONS", 774],
+        ])
+        self.assertIn("30D", rendered["texts"])
+        self.assertEqual(rendered["ghost"], [])
+        visible = " ".join(rendered["texts"])
+        self.assertNotIn("LONGEST SESSION", visible)
+        self.assertNotIn("6H 42M", visible)
+        self.assertIn("42.8 TOK/S", rendered["texts"])
+        self.assertNotIn("Longest session", rendered["aria"])
+        self.assertIn("AI sessions 126.", rendered["aria"])
+        self.assertIn("AI sessions unavailable.", rendered["missingAria"])
+        self.assertEqual(rendered["missingSessionValue"][1:4], ["—", 774, 808])
+        self.assertEqual(rendered["unavailableSpeedValue"][1:4], ["—", 544, 808])
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for canvas verification")
+    def test_standalone_canvas_is_a_linkedin_scale_builder_signal(self):
+        page_path = Path(meter.__file__).with_name("performance.html")
+        script = f"""
+const fs=require('fs'),page=fs.readFileSync({json.dumps(str(page_path))},'utf8');
+function extract(name){{let start=page.indexOf(`function ${{name}}(`);if(start<0)throw Error(`missing ${{name}}`);if(page.slice(start-6,start)==='async ')start-=6;let i=page.indexOf('{{',start),depth=0;for(;i<page.length;i++){{if(page[i]==='{{')depth++;else if(page[i]==='}}'&&--depth===0)return page.slice(start,i+1);}}throw Error(`unclosed ${{name}}`);}}
+	for(const name of ['safeArray','sanitizeBuilderName','compactNumber','durationLabel','formatStat','ellipsize','fitText','supportingStats','drawUsageGroup','drawBuilderRecap','hasActivity'])eval(extract(name));
+class Context{{constructor(){{this.ops=[];this.font='';this.lineWidth=1;}}fillRect(...v){{this.ops.push(['rect',this.fillStyle,...v]);}}fillText(...v){{this.ops.push(['text',String(v[0]),...v.slice(1),this.font]);}}measureText(v){{return {{width:String(v).length*16}};}}beginPath(){{}}arc(...v){{this.ops.push(['arc',this.strokeStyle,...v]);}}stroke(){{this.ops.push(['stroke',this.strokeStyle,this.lineWidth]);}}save(){{}}restore(){{}}translate(){{}}rotate(){{}}}}
+class Canvas{{constructor(){{this.ctx=new Context();this.attrs={{}};this.width=1;this.height=1;}}getContext(){{return this.ctx;}}setAttribute(k,v){{this.attrs[k]=String(v);}}}}
+	const payload={{ok:true,private_sentinel:'prompt://must-not-draw',range_days:30,current:{{start_day:'2026-08-15',end_day:'2026-09-13'}},spotlight_default:'efficiency_change',spotlights:[{{id:'efficiency_change',label:'Output efficiency',family:'efficiency',available:true,current:2680,previous:1942,delta_pct:38,unit:'output tokens/$',basis:'paired cost-covered output and cost'}},{{id:'speed_champion',label:'Fastest model',family:'efficiency',available:true,current:42.8,previous:null,delta_pct:null,unit:'output tokens/s',basis:'weighted measured generation samples',leaders:[{{runtime:'Codex',model:'gpt-5.3'}}]}},{{id:'lines_pushed',label:'Lines pushed',family:'delivery',available:true,current:184392,previous:120000,delta_pct:53.66,unit:'lines',basis:'added plus deleted text lines from successful local pushes'}},{{id:'marathon_session',label:'Longest session',family:'activity',available:true,current:24120,previous:18000,delta_pct:34,unit:'seconds',basis:'active execution duration'}},{{id:'build_streak',label:'Build streak',family:'consistency',available:true,current:14,previous:8,delta_pct:75,unit:'days',basis:'consecutive local days'}}],supporting:[{{id:'active_days',label:'Active days',family:'consistency',available:true,current:24,previous:20,delta_pct:20,unit:'days'}},{{id:'sessions',label:'AI coding sessions',family:'activity',available:true,current:126,previous:91,delta_pct:38.5,unit:'sessions'}},{{id:'delivery_active_days',label:'Delivery-active days',family:'delivery',available:true,current:12,previous:8,delta_pct:50,unit:'days'}},{{id:'output_pace',label:'Output pace',family:'efficiency',available:true,current:31.4,previous:28,delta_pct:12,unit:'output tokens/s'}}],activity_days:Array.from({{length:30}},(_,i)=>({{recorded_session:i<24}})),usage:{{agents:[{{label:'Codex',count:68,share:54}},{{label:'Claude',count:39,share:31}},{{label:'Cursor',count:19,share:15}}],models:[{{label:'gpt-5.3',runtime:'Codex',count:74,share:49}},{{label:'sonnet-4.5',runtime:'Claude',count:48,share:32}},{{label:'gpt-5.2',runtime:'Codex',count:29,share:19}}]}},coverage:{{git:{{available:true}},cost:{{available:true,eligible:22,total:30}},output:{{available:true,eligible:22,total:30}},timing:{{available:true,eligible:14,total:18}}}},privacy:{{content_included:false,project_identity_included:false}}}};
+		const canvas=new Canvas(),result=drawBuilderRecap(canvas,payload,{{name:' Ada\\n Builder ',includeUsage:true}}),texts=canvas.ctx.ops.filter(op=>op[0]==='text').map(op=>op[1]),arcs=canvas.ctx.ops.filter(op=>op[0]==='arc'),bars=canvas.ctx.ops.filter(op=>op[0]==='rect'&&(op[5]===12||op[5]===6)),rhythmBars=canvas.ctx.ops.filter(op=>op[0]==='rect'&&op[2]>=72&&op[2]<1008&&op[3]+op[5]===694),heroFields=canvas.ctx.ops.filter(op=>op[0]==='rect'&&op[1]==='#07171f'&&op[2]===0&&op[3]===0&&op[4]===1080&&op[5]>=700),lowerFields=canvas.ctx.ops.filter(op=>op[0]==='rect'&&op[1]==='#f1eee4'&&op[2]===0&&op[3]>=700&&op[4]===1080&&op[5]>=450),nameOp=canvas.ctx.ops.find(op=>op[0]==='text'&&op[1]==='ADA BUILDER'),heroOp=canvas.ctx.ops.find(op=>op[0]==='text'&&op[3]===412),efficiencyLabelOp=canvas.ctx.ops.find(op=>op[0]==='text'&&op[1]==='OUTPUT EFFICIENCY'&&op[3]===840),metricLabelOps=canvas.ctx.ops.filter(op=>op[0]==='text'&&op[3]===840),ghostPeriodOps=canvas.ctx.ops.filter(op=>op[0]==='text'&&String(op[4]).includes('330px'));
+		const negativePayload=JSON.parse(JSON.stringify(payload));negativePayload.spotlights.find(stat=>stat.id==='lines_pushed').delta_pct=-25;const negativeCanvas=new Canvas();drawBuilderRecap(negativeCanvas,negativePayload,{{name:'',includeUsage:true}});
+		const unavailablePayload=JSON.parse(JSON.stringify(payload));Object.assign(unavailablePayload.spotlights.find(stat=>stat.id==='lines_pushed'),{{available:false,current:null,previous:null,delta_pct:null}});unavailablePayload.coverage.git.available=false;const unavailableCanvas=new Canvas();drawBuilderRecap(unavailableCanvas,unavailablePayload,{{name:'',includeUsage:true}});
+	const flatPayload=JSON.parse(JSON.stringify(payload));flatPayload.spotlights.find(stat=>stat.id==='lines_pushed').delta_pct=0;const flatCanvas=new Canvas();drawBuilderRecap(flatCanvas,flatPayload,{{name:'',includeUsage:true}});const flatTexts=flatCanvas.ctx.ops.filter(op=>op[0]==='text').map(op=>op[1]);
+	const privateCanvas=new Canvas();drawBuilderRecap(privateCanvas,payload,{{name:'',includeUsage:false}});const privateTexts=privateCanvas.ctx.ops.filter(op=>op[0]==='text').map(op=>op[1]);
+	const noUsagePayload=JSON.parse(JSON.stringify(payload));noUsagePayload.usage={{agents:[],models:[]}};const noUsageCanvas=new Canvas();drawBuilderRecap(noUsageCanvas,noUsagePayload,{{name:'',includeUsage:true}});const noUsageTexts=noUsageCanvas.ctx.ops.filter(op=>op[0]==='text').map(op=>op[1]);
+	const gitOnlyPayload=JSON.parse(JSON.stringify(payload));gitOnlyPayload.activity_days=gitOnlyPayload.activity_days.map(day=>({{...day,recorded_session:false}}));const gitOnlyActivity=hasActivity(gitOnlyPayload);
+	class Control{{constructor(){{this.disabled=false;this.checked=false;this.value='';this.textContent='';this.children=[];}}appendChild(child){{this.children.push(child);}}}}
+	const controlElements={{'builder-name':new Control(),'include-usage':new Control()}},$=id=>controlElements[id],document={{querySelectorAll:()=>[],createElement:()=>new Control()}},builderRecapState={{range:30,name:'',includeUsage:true,payload:noUsagePayload}};function builderOptions(){{return {{name:builderRecapState.name,includeUsage:builderRecapState.includeUsage}};}}eval(extract('renderControls'));renderControls(noUsagePayload);
+		console.log(JSON.stringify({{size:[canvas.width,canvas.height],texts,arcs,bars,rhythmBars,heroFields,lowerFields,aria:canvas.attrs['aria-label'],negativeAria:negativeCanvas.attrs['aria-label'],unavailableAria:unavailableCanvas.attrs['aria-label'],flatAria:flatCanvas.attrs['aria-label'],flatTexts,nameOp,heroOp,efficiencyLabelOp,metricLabelOps,ghostPeriodOps,summary:result.summary,privateTexts,privateAria:privateCanvas.attrs['aria-label'],noUsageTexts,noUsageAria:noUsageCanvas.attrs['aria-label'],gitOnlyActivity,noUsageControl:{{disabled:controlElements['include-usage'].disabled,checked:controlElements['include-usage'].checked}}}}));
+"""
+        result = subprocess.run(
+            ["node", "-e", script], capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rendered = json.loads(result.stdout)
+        self.assertEqual(rendered["size"], [1080, 1350])
+        for text in (
+            "TOKEN METER / PERFORMANCE", "30D", "ADA BUILDER", "LINES PUSHED",
+            "184,392", "OUTPUT EFFICIENCY", "2.68K", "BUILD RHYTHM", "24/30",
+            "ACTIVE DAYS", "14 DAY STREAK", "FASTEST MODEL", "42.8 TOK/S",
+            "GPT-5.3", "AI SESSIONS", "126",
+            "MOST-USED AGENT", "GO-TO MODEL", "CODEX", "54%", "49%",
+            "BUILD YOURS →", "github.com/splunk/token-meter",
+        ):
+            self.assertIn(text, rendered["texts"])
+        self.assertEqual(rendered["nameOp"][1:4], ["ADA BUILDER", 72, 126])
+        self.assertIn("46px", rendered["nameOp"][4])
+        self.assertEqual(rendered["heroOp"][1], "184,392")
+        self.assertIsNotNone(rendered["efficiencyLabelOp"])
+        self.assertEqual(
+            [(op[1], op[2]) for op in rendered["metricLabelOps"]],
+            [("ACTIVE DAYS", 72), ("OUTPUT EFFICIENCY", 314),
+             ("FASTEST MODEL", 544), ("AI SESSIONS", 774)],
+        )
+        self.assertEqual(rendered["ghostPeriodOps"], [])
+        self.assertGreaterEqual(len(rendered["bars"]), 6)
+        self.assertEqual(len(rendered["rhythmBars"]), 30)
+        for index, bar in enumerate(rendered["rhythmBars"][:24]):
+            self.assertEqual(bar[1], "#f8f5ec" if index % 5 == 0 else "#00bceb")
+            self.assertEqual(bar[5], 28 + ((index * 19) % 66))
+        for bar in rendered["rhythmBars"][24:]:
+            self.assertEqual((bar[1], bar[5]), ("#263840", 8))
+        self.assertTrue(rendered["heroFields"])
+        self.assertTrue(rendered["lowerFields"])
+        self.assertFalse(rendered["arcs"])
+        for raw_count in ("68", "39", "19", "74", "48", "29"):
+            self.assertNotIn(raw_count, rendered["texts"])
+        visible = " ".join(rendered["texts"])
+        for rejected in (
+            "BUILDER FIELD SHEET", "DAY SIGNAL", "30-DAY RHYTHM", "AGENT MIX",
+            "MODEL MIX", "LOCAL / PARTIAL",
+            "PRIVATE LOCAL AGGREGATES", "AI BUILDER RECAP", "prompt://must-not-draw",
+            "VS PRIOR", "↑", "↓", "+54%", "−25%", "NO CHANGE",
+            "LONGEST SESSION", "6H 42M",
+        ):
+            self.assertNotIn(rejected, visible)
+        self.assertIn(
+            "Name Ada Builder. Current lines pushed 184,392 lines.",
+            rendered["aria"],
+        )
+        self.assertIn(
+            "Current lines pushed 184,392 lines.",
+            rendered["negativeAria"],
+        )
+        self.assertIn(
+            "Current lines pushed unavailable.",
+            rendered["unavailableAria"],
+        )
+        self.assertIn(
+            "Current lines pushed 184,392 lines.", rendered["flatAria"],
+        )
+        for output in (
+            rendered["aria"], rendered["negativeAria"],
+            rendered["unavailableAria"], rendered["flatAria"],
+            rendered["summary"], " ".join(rendered["flatTexts"]),
+        ):
+            for rejected in (
+                "Partial evidence", "Complete evidence", "increased", "decreased",
+                "unchanged", "versus prior", "comparison", "VS PRIOR", "↑", "↓",
+            ):
+                self.assertNotIn(rejected, output)
+        self.assertTrue(rendered["gitOnlyActivity"])
+        self.assertIn("runtime-scoped model usage", rendered["aria"])
+        self.assertNotIn("prompt://must-not-draw", rendered["aria"])
+        private_visible = " ".join(rendered["privateTexts"])
+        self.assertIn("LINES PUSHED", private_visible)
+        self.assertIn("184,392", rendered["privateTexts"])
+        self.assertIn("OUTPUT EFFICIENCY", private_visible)
+        for excluded in ("MOST-USED AGENT", "GO-TO MODEL", "CODEX", "CLAUDE",
+                         "CURSOR", "GPT-5.3", "SONNET-4.5", "GPT-5.2"):
+            self.assertNotIn(excluded, private_visible)
+        for excluded in ("Codex", "Claude", "Cursor", "gpt-5.3", "sonnet-4.5", "gpt-5.2"):
+            self.assertNotIn(excluded, rendered["privateAria"])
+        self.assertIn("Usage charts excluded", rendered["privateAria"])
+        no_usage_visible = " ".join(rendered["noUsageTexts"])
+        self.assertNotIn("MOST-USED AGENT", no_usage_visible)
+        self.assertNotIn("GO-TO MODEL", no_usage_visible)
+        self.assertIn("Usage charts unavailable", rendered["noUsageAria"])
+        self.assertEqual(rendered["noUsageControl"], {
+            "disabled": True, "checked": False,
+        })
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for preview verification")
+    def test_standalone_success_enables_download_without_export_ready_copy(self):
+        page_path = Path(meter.__file__).with_name("performance.html")
+        script = f"""
+const fs=require('fs'),page=fs.readFileSync({json.dumps(str(page_path))},'utf8');
+function extract(name){{let start=page.indexOf(`function ${{name}}(`);if(start<0)throw Error(`missing ${{name}}`);let i=page.indexOf('{{',start),depth=0;for(;i<page.length;i++){{if(page[i]==='{{')depth++;else if(page[i]==='}}'&&--depth===0)return page.slice(start,i+1);}}throw Error(`unclosed ${{name}}`);}}
+class Element{{constructor(){{this.disabled=true;this.hidden=true;this.textContent='';this.dataset={{}};}}}}
+const elements={{download:new Element(),retry:new Element(),poster:new Element(),status:new Element()}},$=id=>elements[id];
+elements.poster.getContext=()=>({{}});elements.poster.setAttribute=()=>{{}};
+const builderRecapState={{payload:{{activity_days:[{{recorded_session:true}}]}},loading:false,error:'',rendered:false}};
+let shouldFail=false;function hasActivity(){{return true;}}function drawBuilderRecap(){{if(shouldFail)throw Error('private failure');}}function drawPlaceholder(){{}}function builderOptions(){{return {{}};}}function setStatus(message,kind=''){{elements.status.textContent=message;elements.status.dataset.kind=kind;}}
+eval(extract('renderPreview'));
+const ready=renderPreview(),success={{ready,download:elements.download.disabled,status:elements.status.textContent,kind:elements.status.dataset.kind}};
+shouldFail=true;const failed=renderPreview(),failure={{failed,download:elements.download.disabled,retry:elements.retry.hidden,status:elements.status.textContent,kind:elements.status.dataset.kind}};
+console.log(JSON.stringify({{success,failure}}));
+"""
+        result = subprocess.run(
+            ["node", "-e", script], capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rendered = json.loads(result.stdout)
+        self.assertEqual(rendered["success"], {
+            "ready": True, "download": False, "status": "", "kind": "",
+        })
+        self.assertEqual(rendered["failure"], {
+            "failed": False, "download": True, "retry": False,
+            "status": "Preview unavailable. Try again.", "kind": "error",
+        })
+
+    def test_standalone_export_contract_is_png_only(self):
+        page = Path(meter.__file__).with_name("performance.html").read_text()
+        for marker in (
+            "canvas.width=1080", "canvas.height=1350", "canvas.toBlob(blob=>",
+            "'image/png'", "URL.revokeObjectURL", "function downloadRecap(",
+            "function resetRecap(", "new AbortController()",
+        ):
+            self.assertIn(marker, page)
+        self.assertNotIn("LOCAL / PARTIAL", page)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for input verification")
+    def test_standalone_name_input_preserves_spaces_while_typing(self):
+        page_path = Path(meter.__file__).with_name("performance.html")
+        script = f"""
+const fs=require('fs'),page=fs.readFileSync({json.dumps(str(page_path))},'utf8');
+function extract(name){{let start=page.indexOf(`function ${{name}}(`);if(start<0)throw Error(`missing ${{name}}`);let i=page.indexOf('{{',start),depth=0;for(;i<page.length;i++){{if(page[i]==='{{')depth++;else if(page[i]==='}}'&&--depth===0)return page.slice(start,i+1);}}throw Error(`unclosed ${{name}}`);}}
+const input={{value:'',addEventListener(type,handler){{this.handler=handler;}}}},$=id=>input;
+const builderRecapState={{name:''}};let renders=0;function renderPreview(){{renders++;}}
+eval(extract('sanitizeBuilderName'));
+const handlerSource=page.split('\\n').find(line=>line.startsWith("$('builder-name').addEventListener('input',"));eval(handlerSource);
+for(const character of 'Ada Lovelace'){{input.value+=character;input.handler({{target:input}});}}
+console.log(JSON.stringify({{field:input.value,state:builderRecapState.name,renders}}));
+"""
+        result = subprocess.run(
+            ["node", "-e", script], capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {
+            "field": "Ada Lovelace", "state": "Ada Lovelace", "renders": 12,
+        })
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for request verification")
+    def test_standalone_request_lifecycle_is_latest_only_and_retryable(self):
+        page_path = Path(meter.__file__).with_name("performance.html")
+        script = f"""
+const fs=require('fs'),page=fs.readFileSync({json.dumps(str(page_path))},'utf8');
+function extract(name){{let start=page.indexOf(`function ${{name}}(`);if(start<0)throw Error(`missing ${{name}}`);if(page.slice(start-6,start)==='async ')start-=6;let i=page.indexOf('{{',start),depth=0;for(;i<page.length;i++){{if(page[i]==='{{')depth++;else if(page[i]==='}}'&&--depth===0)return page.slice(start,i+1);}}throw Error(`unclosed ${{name}}`);}}
+class Element{{constructor(){{this.disabled=false;this.hidden=true;this.checked=false;this.value='';this.dataset={{}};}}}}
+const elements=Object.fromEntries(['download','retry','builder-name','include-usage'].map(id=>[id,new Element()])), $=id=>elements[id];
+const builderRecapState={{range:30,name:'',includeUsage:true,payload:null,request:0,controller:null,loading:false,error:'',rendered:false}};
+class AbortController{{constructor(){{this.signal={{aborted:false}};}}abort(){{this.signal.aborted=true;}}}}
+let requests=[],status='';function fetch(url,options){{return new Promise(resolve=>requests.push({{url,options,resolve}}));}}function renderControls(){{}}function drawPlaceholder(){{}}function setStatus(message){{status=message;}}function renderPreview(){{builderRecapState.rendered=true;$('download').disabled=false;return true;}}
+eval(extract('sanitizeBuilderName'));eval(extract('loadRecap'));eval(extract('resetRecap'));
+const payload=range=>({{ok:true,range_days:range,activity_days:[{{recorded_session:true}}],coverage:{{git:{{available:true}}}}}});
+;(async()=>{{
+ const first=loadRecap(30);await Promise.resolve();const second=loadRecap(7);await Promise.resolve();const third=loadRecap(90);await Promise.resolve();
+ requests[0].resolve({{ok:true,json:async()=>payload(30)}});requests[1].resolve({{ok:true,json:async()=>payload(7)}});requests[2].resolve({{ok:true,json:async()=>payload(90)}});await Promise.all([first,second,third]);
+ const latest={{range:builderRecapState.range,payload:builderRecapState.payload.range_days,aborted:requests[1].options.signal.aborted,download:$('download').disabled}};
+ const sanitized=sanitizeBuilderName('  Ada\\n\\u0000 Lovelace  ');
+ const failedPromise=loadRecap(7);await Promise.resolve();requests[3].resolve({{ok:false,json:async()=>({{}})}});await failedPromise;const failed={{download:$('download').disabled,retry:$('retry').hidden,status}};
+ builderRecapState.name='Ada';builderRecapState.includeUsage=false;const resetPromise=resetRecap();await Promise.resolve();requests[4].resolve({{ok:true,json:async()=>payload(30)}});await resetPromise;
+ const reset={{range:builderRecapState.range,name:builderRecapState.name,usage:builderRecapState.includeUsage}};
+ console.log(JSON.stringify({{latest,sanitized,failed,reset,urls:requests.map(item=>item.url)}}));
+}})().catch(error=>{{console.error(error.stack||error);process.exitCode=1;}});
+"""
+        result = subprocess.run(
+            ["node", "-e", script], capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rendered = json.loads(result.stdout)
+        self.assertEqual(rendered["latest"], {
+            "range": 90, "payload": 90, "aborted": True, "download": False,
+        })
+        self.assertEqual(rendered["sanitized"], "Ada Lovelace")
+        self.assertEqual(rendered["failed"], {
+            "download": True, "retry": False,
+            "status": "Unable to load the builder recap. Try again.",
+        })
+        self.assertEqual(rendered["reset"], {
+            "range": 30, "name": "", "usage": True,
+        })
+        self.assertEqual(rendered["urls"], [
+            "/builder-recap?range=30", "/builder-recap?range=7",
+            "/builder-recap?range=90", "/builder-recap?range=7",
+            "/builder-recap?range=30",
+        ])
 
 
 class LegacyJsonlLoadTests(unittest.TestCase):
@@ -4316,6 +5444,33 @@ console.log(JSON.stringify({
         self.assertIn("const PANEL_KEYS=['summary'];", self.page)
         self.assertNotIn("mountCurrentModule('preview-settings", self.page)
 
+    def test_builder_recap_is_a_separate_document(self):
+        primary = self.page.split("<div class=navPrimary>", 1)[1].split("</div>", 1)[0]
+        performance = re.search(
+            r'<a[^>]+id=tab-performance[^>]*>.*?</a>', primary, re.S
+        )
+        self.assertIsNotNone(performance)
+        anchor = performance.group(0)
+        for marker in (
+            "class=tab", "href=/performance", "data-label=Performance",
+            "aria-label=Performance", "<span class=tabLabel>Performance</span>",
+        ):
+            self.assertIn(marker, anchor)
+        self.assertNotIn("aria-keyshortcuts", anchor)
+        self.assertNotIn("tabShortcut", anchor)
+        self.assertLess(primary.index("id=tab-efficiency"), primary.index("id=tab-git"))
+        self.assertLess(primary.index("id=tab-git"), primary.index("id=tab-performance"))
+        efficiency = self.page.split("<div class=view id=view-efficiency>", 1)[1].split(
+            "<div class=view id=view-git>", 1
+        )[0]
+        self.assertNotIn("id=e-builder-recap", efficiency)
+        for rejected in (
+            "id=view-performance-card", "performance-card", ".recapPageHead",
+            "const builderRecapState=", "function drawBuilderRecap(",
+            "recap-canvas", "recap-download",
+        ):
+            self.assertNotIn(rejected, self.page)
+
     def test_model_stats_is_a_first_class_top_level_route(self):
         for marker in ("id=tab-models", "id=view-models", "id=m-speed", "id=m-chart",
                        "id=m-table", "renderModelStats", "aggregateModelDays"):
@@ -6718,7 +7873,8 @@ console.log(JSON.stringify({
     def test_primary_navigation_and_command_palette_share_the_same_workflow_order(self):
         tab_ids = [
             "tab-session", "tab-daily", "tab-models",
-            "tab-efficiency", "tab-git", "tab-learn", "tab-capabilities", "tab-settings",
+            "tab-efficiency", "tab-git", "tab-performance", "tab-learn",
+            "tab-capabilities", "tab-settings",
         ]
         positions = [self.page.index(f"id={tab_id}") for tab_id in tab_ids]
         self.assertEqual(positions, sorted(positions))

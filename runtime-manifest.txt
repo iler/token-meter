@@ -2,6 +2,7 @@
 required runtime-manifest.txt
 required meter.py
 required page.html
+required performance.html
 required token_meter_mcp.py
 required menubar/TokenMeterMenuBar.swift
 required menubar/Info.plist

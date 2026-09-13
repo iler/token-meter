@@ -1,0 +1,234 @@
+<!doctype html>
+<html lang=en>
+<head>
+<meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<title>Token Meter — Performance card</title>
+<meta name=theme-color content="#07090c">
+<style>
+@font-face{font-family:"Tektur Local";src:url("/assets/fonts/Tektur-Variable.ttf") format("truetype");font-style:normal;font-weight:400 900;font-stretch:75% 100%;font-display:swap}
+:root{color-scheme:dark;--bg:#07090c;--panel:#111820;--panel2:#17212b;--line:rgba(171,223,238,.09);--line2:rgba(177,228,241,.17);--edge:rgba(127,219,242,.38);--fg:#f6f8fb;--dim:#a8b3c1;--faint:#7d8ba0;--cyan:#00bceb;--blue:#1ba0e1;--sky:#7fdbf2;--violet:#c7a7ff;--warn:#ffb457;--paper:#f1eee4;--ink:#10191d;--active:linear-gradient(132deg,var(--cyan),var(--blue) 48%,var(--sky));--card:radial-gradient(ellipse 82% 90% at 102% -8%,rgba(127,219,242,.115),transparent 58%),radial-gradient(ellipse 74% 74% at -8% 108%,rgba(199,167,255,.075),transparent 62%),linear-gradient(145deg,rgba(22,32,42,.99),rgba(12,19,26,.99) 55%,rgba(8,13,19,.995));--shadow:0 1px 0 rgba(215,246,253,.16),0 20px 46px rgba(0,0,0,.36),0 8px 24px rgba(0,125,168,.1)}
+*{box-sizing:border-box}
+html,body{margin:0;min-height:100%;background:var(--bg);color:var(--fg);font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+body{background:radial-gradient(ellipse 72% 48% at 13% -9%,rgba(0,188,235,.21),transparent 62%),radial-gradient(ellipse 56% 42% at 96% 2%,rgba(199,167,255,.14),transparent 60%),radial-gradient(ellipse 56% 38% at 68% 105%,rgba(27,160,225,.1),transparent 68%),linear-gradient(155deg,#05070a 0%,#09131b 42%,#0c111a 68%,#07090c 100%)}
+button,input,select{font:inherit}button,a,input,select{outline:none}button{cursor:pointer}
+button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid var(--cyan);outline-offset:2px}
+.performanceShell{--rail-width:184px;display:grid;grid-template-columns:var(--rail-width) minmax(0,1320px);column-gap:20px;align-items:start;width:100%;max-width:1532px;min-height:100vh;margin:0 auto;padding:18px 24px 48px}
+.performanceRail{position:sticky;top:18px;display:flex;height:calc(100vh - 36px);min-height:520px;flex-direction:column;gap:12px;padding:12px;border:1px solid var(--edge);border-radius:10px;background:radial-gradient(ellipse 120% 38% at 18% -4%,rgba(0,188,235,.22),transparent 62%),radial-gradient(ellipse 110% 42% at 118% 84%,rgba(199,167,255,.11),transparent 62%),linear-gradient(165deg,rgba(15,27,36,.995),rgba(8,15,22,.995) 52%,rgba(7,11,17,.998));box-shadow:var(--shadow)}
+.performanceRail:before{content:"";position:absolute;inset:0 12px auto;height:1px;background:linear-gradient(90deg,transparent,var(--cyan) 24%,var(--sky) 58%,rgba(199,167,255,.54) 80%,transparent);opacity:.65}
+.railBrand{display:flex;min-width:0;align-items:center;gap:9px;padding:3px 2px 10px;color:var(--fg);font-weight:780;text-decoration:none;white-space:nowrap}.railBrand img{display:block;width:50px;height:auto;max-height:30px;object-fit:contain}.railBrandName{min-width:0;overflow:hidden;text-overflow:ellipsis}
+.railNav{display:flex;min-height:0;flex:1;flex-direction:column;gap:4px;padding-top:10px;border-top:1px solid var(--line)}.railPrimary,.railSecondary{display:flex;flex-direction:column;gap:4px}.railSecondary{margin-top:auto;padding-top:10px;border-top:1px solid var(--line)}
+.railLink{display:grid;width:100%;min-height:42px;grid-template-columns:18px minmax(0,1fr);align-items:center;gap:10px;padding:9px 10px;border-radius:6px;color:var(--dim);font-size:13px;font-weight:700;text-decoration:none}.railLink:hover{background:linear-gradient(135deg,rgba(0,188,235,.105),rgba(199,167,255,.055));color:var(--fg)}.railLink.on{background:var(--active);color:#062430;box-shadow:0 8px 22px rgba(0,156,201,.22),inset 0 1px 0 rgba(255,255,255,.38)}
+.railIcon{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}.railLabel{min-width:0;overflow:hidden;text-overflow:ellipsis}
+.performanceSurface{grid-column:2;min-width:0}
+.performanceHeader{position:relative;isolation:isolate;display:flex;height:138px;align-items:flex-start;overflow:hidden;margin-bottom:14px;padding:24px 30px;border:1px solid var(--edge);border-radius:8px;background:linear-gradient(116deg,rgba(13,28,37,.995),rgba(7,15,22,.995) 52%,rgba(9,13,24,.99));box-shadow:var(--shadow)}
+.performanceHeader:after{content:"";position:absolute;right:0;bottom:0;left:0;height:1px;background:linear-gradient(90deg,transparent 2%,rgba(0,188,235,.76) 24%,rgba(127,219,242,.7) 56%,rgba(199,167,255,.62) 79%,transparent 98%)}
+.headerCopy{position:relative;z-index:3}.headerEyebrow{display:block;margin-bottom:4px;color:var(--sky);font:800 10px/1 ui-monospace,"SF Mono",Menlo,monospace;letter-spacing:.16em;text-transform:uppercase}.headerCopy h1{margin:0;font-family:"Tektur Local","Avenir Next Condensed",-apple-system,sans-serif;font-size:52px;font-stretch:88%;font-weight:610;line-height:.98;letter-spacing:-.035em}
+.headerSignal{position:absolute;z-index:1;right:30px;bottom:0;display:flex;width:min(56%,650px);height:100%;align-items:flex-end;gap:6px;padding:18px 0 0;opacity:.72;transform:skewX(-8deg);mask-image:linear-gradient(90deg,transparent,#000 20%,#000 100%)}.headerSignal i{display:block;flex:1;height:var(--h);min-width:3px;background:linear-gradient(180deg,rgba(127,219,242,.08),rgba(0,188,235,.7));border-top:1px solid rgba(186,235,248,.65)}.headerSignal i:nth-child(3n){background:linear-gradient(180deg,rgba(199,167,255,.04),rgba(199,167,255,.46))}.headerSignal i:nth-child(5n){background:linear-gradient(180deg,rgba(255,180,87,.03),rgba(255,180,87,.28))}
+.studioWorkspace{display:grid;grid-template-columns:220px minmax(0,1fr);gap:14px;align-items:start}
+.controlDock{position:sticky;top:18px;display:flex;flex-direction:column;gap:18px;align-items:stretch;margin:0;padding:16px;border:1px solid var(--line2);border-radius:8px;background:var(--card);box-shadow:0 1px 0 rgba(255,255,255,.055),0 12px 30px rgba(0,0,0,.24)}
+.field{display:grid;min-width:0;gap:6px}.field>span,.field legend{color:var(--faint);font-size:9px;font-weight:850;letter-spacing:.13em;text-transform:uppercase}.field input,.field select{width:100%;height:40px;min-width:0;border:1px solid var(--line2);border-radius:6px;background:radial-gradient(circle at 88% 0,rgba(127,219,242,.08),transparent 46%),linear-gradient(145deg,rgba(22,34,44,.96),rgba(9,16,23,.98));box-shadow:inset 0 1px 0 rgba(255,255,255,.035),0 5px 14px rgba(0,0,0,.1);color:var(--fg);padding:0 11px}.field input::placeholder{color:#647483}.field input:hover,.field select:hover{border-color:var(--edge)}
+fieldset.field{border:0;padding:0;margin:0}.segments{display:grid;grid-template-columns:repeat(3,1fr);gap:3px;padding:3px;border:1px solid var(--line2);border-radius:6px;background:#071015}.segments button{height:32px;border:0;border-radius:4px;background:transparent;color:var(--dim);font-size:11px;font-weight:800}.segments button:hover{color:var(--fg);background:rgba(0,188,235,.08)}.segments button.on{background:var(--active);color:#051116;box-shadow:0 5px 14px rgba(0,156,201,.2)}
+.toggleGroup{display:grid;gap:4px;padding-bottom:1px}.toggle{display:flex;min-height:20px;align-items:center;justify-content:space-between;gap:8px;color:var(--dim);font-size:10px;font-weight:700}.toggle input{position:relative;width:29px;height:16px;flex:0 0 auto;margin:0;appearance:none;border:1px solid var(--line2);border-radius:999px;background:#071015}.toggle input:after{content:"";position:absolute;top:2px;left:2px;width:10px;height:10px;border-radius:50%;background:var(--faint);transition:left .15s,background .15s}.toggle input:checked{border-color:rgba(0,188,235,.52);background:rgba(0,188,235,.17)}.toggle input:checked:after{left:15px;background:var(--sky)}.toggle input:disabled{opacity:.38;cursor:not-allowed}
+.stateGroup{display:grid;min-width:0;padding-top:2px;border-top:1px solid var(--line)}#status{min-height:15px;margin:10px 0 0;color:var(--faint);font-size:10px;overflow-wrap:anywhere}#status[data-kind=error]{color:#ffc078}#status[data-kind=success]{color:#7fe0bc}
+.actions{display:grid;grid-template-columns:1fr;gap:7px}.actions button{width:100%;height:40px;border:1px solid var(--line2);border-radius:6px;background:#0a141b;color:var(--dim);padding:0 13px;font-weight:760;white-space:nowrap}.actions button:hover:not(:disabled){border-color:var(--edge);color:var(--fg)}.actions #download{border:0;background:var(--active);color:#06141a;font-weight:900;padding:0 12px;box-shadow:0 8px 20px rgba(0,156,201,.2)}.actions button:disabled{opacity:.42;cursor:not-allowed}
+.stage{position:relative;display:grid;place-items:center;min-height:720px;overflow:hidden;padding:62px 42px 48px;border:1px solid var(--line2);border-radius:8px;background:radial-gradient(ellipse 44% 40% at 50% 46%,rgba(0,188,235,.09),transparent 70%),radial-gradient(ellipse 55% 55% at 83% 14%,rgba(199,167,255,.07),transparent 72%),linear-gradient(rgba(127,219,242,.025) 1px,transparent 1px),linear-gradient(90deg,rgba(127,219,242,.025) 1px,transparent 1px),linear-gradient(145deg,rgba(13,24,32,.98),rgba(6,12,18,.99));background-size:auto,auto,28px 28px,28px 28px,auto;box-shadow:var(--shadow)}
+.stageMeta{position:absolute;z-index:3;top:18px;right:22px;left:22px;display:flex;justify-content:space-between;color:var(--faint);font:800 9px/1 ui-monospace,"SF Mono",Menlo,monospace;letter-spacing:.14em;text-transform:uppercase}
+.posterFrame{position:relative;width:min(100%,620px)}.posterFrame:before,.posterFrame:after{content:"";position:absolute;pointer-events:none}.posterFrame:before{z-index:0;inset:-13px 14px 13px -14px;border:1px solid rgba(0,188,235,.32);background:rgba(0,188,235,.03)}.posterFrame:after{z-index:0;inset:13px -14px -13px 14px;border:1px solid rgba(199,167,255,.22);background:rgba(199,167,255,.025)}
+#poster{position:relative;z-index:1;display:block;width:100%;height:auto;aspect-ratio:4/5;background:var(--paper);box-shadow:0 1px 0 rgba(255,255,255,.24),0 38px 100px rgba(0,0,0,.58),0 0 42px rgba(0,188,235,.06)}
+[hidden]{display:none!important}
+@media(max-width:1180px){.performanceShell{--rail-width:68px;column-gap:16px;padding-right:18px;padding-left:18px}.performanceRail{padding:10px 8px}.railBrand{justify-content:center;padding-right:0;padding-left:0}.railBrand img{width:50px}.railBrandName,.railLabel{display:none}.railLink{grid-template-columns:1fr;place-items:center;padding:9px}.studioWorkspace{grid-template-columns:190px minmax(0,1fr)}}
+@media(max-width:1024px){.performanceShell{column-gap:14px;padding:14px}.performanceRail{top:14px;height:calc(100vh - 28px)}.performanceHeader{height:126px;padding:22px 24px}.headerCopy h1{font-size:46px}.headerSignal{right:24px;width:61%}.studioWorkspace{grid-template-columns:180px minmax(0,1fr);gap:12px}.controlDock{top:14px;padding:13px;gap:15px}.stage{min-height:680px;padding:58px 28px 42px}.posterFrame{width:min(100%,560px)}}
+@media(max-width:760px){.performanceShell{display:block;padding:12px 14px 40px}.performanceRail{position:sticky;top:0;z-index:10;display:grid;height:auto;min-height:0;grid-template-columns:auto minmax(0,1fr);align-items:center;margin-bottom:14px;padding:8px 0 10px;border:0;border-bottom:1px solid var(--edge);border-radius:0}.railBrand{justify-content:flex-start;padding:0}.railBrandName{display:inline}.railNav{grid-column:1/-1;overflow-x:auto;flex-direction:row;padding-top:8px}.railPrimary,.railSecondary{display:contents}.railLink{display:flex;width:auto;min-height:38px;gap:7px;padding:8px 11px;white-space:nowrap}.railLabel{display:inline}.performanceSurface{width:100%}.performanceHeader{height:112px}.headerSignal{right:20px;width:72%}.studioWorkspace{display:block}.controlDock{position:static;display:grid;grid-template-columns:repeat(2,minmax(0,1fr));margin-bottom:14px}.controlDock>*{grid-column:span 1}.actions{grid-template-columns:repeat(2,minmax(0,1fr))}.stage{padding:56px 24px 36px}}
+</style>
+</head>
+<body class="spectrumApp performanceApp">
+<div class=performanceShell>
+ <aside class=performanceRail id=performance-rail aria-label="Token Meter navigation">
+  <a class=railBrand href="/#sessions" aria-label="Token Meter dashboard"><img src="/assets/brand/logo-splunk-acc-rgb-w.png" alt=""><span class=railBrandName>Token Meter</span></a>
+  <nav class=railNav id=performance-navigation aria-label="Primary navigation">
+   <div class=railPrimary>
+    <a class=railLink href="/#sessions" aria-label=Sessions title=Sessions><svg class=railIcon viewBox="0 0 24 24" aria-hidden=true><path d="M4 7h16M4 12h16M4 17h16"/><path d="M7 5v4M14 10v4M18 15v4"/></svg><span class=railLabel>Sessions</span></a>
+    <a class=railLink href="/#spend" aria-label=Spend title=Spend><svg class=railIcon viewBox="0 0 24 24" aria-hidden=true><rect x="4" y="5" width="16" height="15" rx="2"/><path d="M8 3v4M16 3v4M4 9h16M8 13h3M8 17h7"/></svg><span class=railLabel>Spend</span></a>
+    <a class=railLink href="/#models" aria-label=Models title=Models><svg class=railIcon viewBox="0 0 24 24" aria-hidden=true><path d="M4 18l5-5 4 2 7-8"/><path d="M16 7h4v4M4 20h16"/></svg><span class=railLabel>Models</span></a>
+    <a class=railLink href="/#efficiency" aria-label=Efficiency title=Efficiency><svg class=railIcon viewBox="0 0 24 24" aria-hidden=true><path d="M5 19V9M12 19V5M19 19v-7"/><path d="M3 19h18"/></svg><span class=railLabel>Efficiency</span></a>
+    <a class=railLink href="/#git" aria-label=Git title=Git><svg class=railIcon viewBox="0 0 24 24" aria-hidden=true><path d="M4 16l5-5 4 3 7-8"/><path d="M15 6h5v5M4 20h16"/></svg><span class=railLabel>Git</span></a>
+    <a class="railLink on" id=tab-performance href=/performance aria-label=Performance aria-current=page title=Performance><svg class=railIcon viewBox="0 0 24 24" aria-hidden=true><rect x="5" y="4" width="14" height="16" rx="2"/><path d="M8 15v-3M12 15V9M16 15v-5M8 18h8"/></svg><span class=railLabel>Performance</span></a>
+   </div>
+   <div class=railSecondary>
+    <a class=railLink href="/#learn" aria-label=Learn title=Learn><svg class=railIcon viewBox="0 0 24 24" aria-hidden=true><path d="M4 5.5A3.5 3.5 0 0 1 7.5 2H11v17H7.5A3.5 3.5 0 0 0 4 22zM20 5.5A3.5 3.5 0 0 0 16.5 2H13v17h3.5A3.5 3.5 0 0 1 20 22z"/></svg><span class=railLabel>Learn</span></a>
+    <a class=railLink href="/#capabilities" aria-label=Tools title=Tools><svg class=railIcon viewBox="0 0 24 24" aria-hidden=true><path d="M14 6a4 4 0 0 0-5 5L4 16l4 4 5-5a4 4 0 0 0 5-5l-3 3-3-3z"/></svg><span class=railLabel>Tools</span></a>
+    <a class=railLink href="/#settings" aria-label=Settings title=Settings><svg class=railIcon viewBox="0 0 24 24" aria-hidden=true><path d="M4 7h10M18 7h2M4 17h3M11 17h9M14 4v6M7 14v6"/></svg><span class=railLabel>Settings</span></a>
+   </div>
+  </nav>
+ </aside>
+ <main class=performanceSurface id=performance-surface>
+  <header class=performanceHeader id=performance-header>
+   <div class=headerCopy><span class=headerEyebrow>Builder field sheet</span><h1>Performance card</h1></div>
+   <div class=headerSignal aria-hidden=true><i style="--h:26%"></i><i style="--h:44%"></i><i style="--h:34%"></i><i style="--h:68%"></i><i style="--h:52%"></i><i style="--h:81%"></i><i style="--h:43%"></i><i style="--h:72%"></i><i style="--h:57%"></i><i style="--h:91%"></i><i style="--h:63%"></i><i style="--h:76%"></i><i style="--h:48%"></i><i style="--h:84%"></i><i style="--h:59%"></i><i style="--h:70%"></i></div>
+  </header>
+  <div class=studioWorkspace>
+   <section class=controlDock id=performance-controls aria-label="Performance controls">
+   <fieldset class=field id=range-controls><legend>Period</legend><div class=segments><button type=button data-range=7>7D</button><button class=on type=button data-range=30>30D</button><button type=button data-range=90>90D</button></div></fieldset>
+   <label class=field><span>Name</span><input id=builder-name maxlength=40 autocomplete=off placeholder="Optional"></label>
+   <div class=toggleGroup>
+    <label class=toggle><span>Usage charts</span><input id=include-usage type=checkbox checked></label>
+   </div>
+   <div class=stateGroup><p id=status role=status aria-live=polite>Loading local recap evidence…</p></div>
+   <div class=actions><button id=reset type=button>Reset</button><button id=retry type=button hidden>Retry</button><button id=download type=button disabled>Download PNG</button></div>
+   </section>
+   <section class=stage id=performance-preview aria-label="Builder Field Sheet preview">
+    <div class=stageMeta aria-hidden=true><span>Live preview</span><span>1080 × 1350 · PNG</span></div>
+    <div class=posterFrame><canvas id=poster width=1080 height=1350 role=img aria-label="Builder recap preview loading"></canvas></div>
+   </section>
+  </div>
+ </main>
+</div>
+<script>
+const $=id=>document.getElementById(id);
+const builderRecapState={range:30,name:'',includeUsage:true,payload:null,request:0,controller:null,loading:false,error:'',rendered:false};
+function safeArray(value){return Array.isArray(value)?value:[];}
+function sanitizeBuilderName(value){return String(value??'').replace(/[\u0000-\u001f\u007f]+/g,' ').replace(/\s+/g,' ').trim().slice(0,40);}
+function compactNumber(value){
+ const number=Number(value);
+ if(!Number.isFinite(number))return '—';
+ const absolute=Math.abs(number);
+ if(absolute>=1e6)return `${(number/1e6).toFixed(absolute>=1e7?1:2).replace(/\.0+$|(?<=\.[0-9])0$/,'')}M`;
+ if(absolute>=1e3)return `${(number/1e3).toFixed(absolute>=1e4?1:2).replace(/\.0+$|(?<=\.[0-9])0$/,'')}K`;
+ if(Number.isInteger(number))return String(number);
+ return number.toFixed(1).replace(/\.0$/,'');
+}
+function durationLabel(value){
+ const seconds=Math.max(0,Math.round(Number(value)||0)),hours=Math.floor(seconds/3600),minutes=Math.floor(seconds%3600/60);
+ if(hours)return `${hours}H ${String(minutes).padStart(2,'0')}M`;
+ if(minutes)return `${minutes}M`;
+ return `${seconds}S`;
+}
+function formatStat(stat){
+ if(!stat||stat.available!==true||!Number.isFinite(Number(stat.current)))return '—';
+ if(stat.id==='lines_pushed')return Math.round(Number(stat.current)).toLocaleString('en-US');
+ const unit=String(stat.unit||'').toLowerCase();
+ if(unit==='seconds')return durationLabel(stat.current);
+ return compactNumber(stat.current);
+}
+function ellipsize(ctx,value,maxWidth){
+ const text=String(value||'');
+ if(ctx.measureText(text).width<=maxWidth)return text;
+ let result=text;
+ while(result.length&&ctx.measureText(`${result}…`).width>maxWidth)result=result.slice(0,-1);
+ return `${result}…`;
+}
+function fitText(ctx,value,maxWidth,start=120,min=34){
+ let size=start;
+ while(size>min){ctx.font=`900 ${size}px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif`;if(ctx.measureText(String(value)).width<=maxWidth)break;size-=2;}
+ return size;
+}
+function supportingStats(payload,options){
+ options=options||{};
+ const raw=[...safeArray(payload&&payload.spotlights),...safeArray(payload&&payload.supporting)].filter(stat=>stat&&typeof stat==='object');
+ const efficiency=raw.find(stat=>stat.id==='efficiency_change')||{id:'efficiency_change',label:'Output efficiency',family:'efficiency',available:false,current:null,previous:null,delta_pct:null,unit:'output tokens/$'};
+ const speed=raw.find(stat=>stat.id==='speed_champion')||{id:'speed_champion',label:'Fastest model',family:'efficiency',available:false,current:null,previous:null,delta_pct:null,unit:'output tokens/s',leaders:[]};
+ const sessions=raw.find(stat=>stat.id==='sessions')||{id:'sessions',label:'AI Sessions',family:'activity',available:false,current:null,previous:null,delta_pct:null,unit:'sessions'};
+ return [efficiency,speed,sessions];
+}
+function drawUsageGroup(ctx,title,rows,x,y,width,color){
+ const ranked=safeArray(rows).slice(0,3);if(!ranked.length)return;
+ const leader=ranked[0],leaderShare=Math.max(0,Math.min(100,Number(leader&&leader.share)||0));
+ ctx.fillStyle='#596467';ctx.font='900 13px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';ctx.fillText(title,x,y);
+ ctx.fillStyle='#07171f';ctx.font='900 34px "Arial Narrow","Avenir Next Condensed",sans-serif';ctx.fillText(ellipsize(ctx,String(leader&&leader.label||'').toUpperCase(),width-104),x,y+48);
+ ctx.font='900 38px "Arial Narrow","Avenir Next Condensed",sans-serif';ctx.textAlign='right';ctx.fillText(`${Math.round(leaderShare)}%`,x+width,y+48);ctx.textAlign='left';
+ ctx.fillStyle='#c7c5bd';ctx.fillRect(x,y+68,width,12);ctx.fillStyle=color;ctx.fillRect(x,y+68,Math.max(12,width*leaderShare/100),12);
+ ranked.slice(1).forEach((row,index)=>{
+  const top=y+118+index*46,share=Math.max(0,Math.min(100,Number(row&&row.share)||0));
+  ctx.fillStyle='#07171f';ctx.font='900 13px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';ctx.fillText(ellipsize(ctx,String(row&&row.label||'').toUpperCase(),width-58),x,top);
+  ctx.fillStyle='#596467';ctx.textAlign='right';ctx.fillText(`${Math.round(share)}%`,x+width,top);ctx.textAlign='left';
+  ctx.fillStyle='#d6d3ca';ctx.fillRect(x,top+10,width,6);ctx.fillStyle=index===0?'#07171f':'#4054d6';ctx.fillRect(x,top+10,Math.max(8,width*share/100),6);
+ });
+}
+function drawBuilderRecap(canvas,payload,options){
+ options=options||{};
+ canvas.width=1080;canvas.height=1350;
+ const ctx=canvas.getContext('2d'),paper='#f1eee4',ink='#07171f',muted='#657074',cyan='#00bceb',cobalt='#4054d6',light='#f8f5ec';
+ ctx.fillStyle=ink;ctx.fillRect(0,0,1080,720);
+ ctx.fillStyle=paper;ctx.fillRect(0,720,1080,500);
+ ctx.fillStyle=cyan;ctx.fillRect(0,0,18,1350);ctx.fillStyle=cobalt;ctx.fillRect(18,0,8,720);
+ const name=sanitizeBuilderName(options.name),range=[7,30,90].includes(Number(payload&&payload.range_days))?Number(payload.range_days):30;
+ const lineStat=safeArray(payload&&payload.spotlights).find(stat=>stat&&stat.id==='lines_pushed');
+ const lead=lineStat||{id:'lines_pushed',label:'Lines pushed',family:'delivery',available:false,current:null,previous:null,delta_pct:null,unit:'lines'};
+ ctx.fillStyle=light;ctx.font='900 19px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';ctx.fillText('TOKEN METER / PERFORMANCE',72,72);
+ ctx.textAlign='right';ctx.fillStyle=cyan;ctx.font='900 30px "Arial Narrow","Avenir Next Condensed",sans-serif';ctx.fillText(`${range}D`,1008,73);ctx.textAlign='left';
+ const endDay=String(payload&&payload.current&&payload.current.end_day||''),monthIndex=Number(endDay.slice(5,7))-1,year=endDay.slice(0,4),month=['JANUARY','FEBRUARY','MARCH','APRIL','MAY','JUNE','JULY','AUGUST','SEPTEMBER','OCTOBER','NOVEMBER','DECEMBER'][monthIndex]||'';
+ if(name){const nameSize=fitText(ctx,name.toUpperCase(),700,46,24);ctx.fillStyle=light;ctx.font=`900 ${nameSize}px "Arial Narrow","Avenir Next Condensed",-apple-system,sans-serif`;ctx.fillText(name.toUpperCase(),72,126);}
+ if(month&&year){ctx.textAlign='right';ctx.fillStyle='#82949c';ctx.font='800 14px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';ctx.fillText(`${month} ${year}`,1008,126);ctx.textAlign='left';}
+ ctx.fillStyle='#30434c';ctx.fillRect(72,154,936,2);ctx.fillStyle=cyan;ctx.fillRect(72,154,196,2);
+ const leadLabel='LINES PUSHED',leadValue=formatStat(lead),hasCurrent=lead.available===true&&Number.isFinite(Number(lead.current)),heroValue=leadValue,condensed='"Arial Narrow","Avenir Next Condensed",-apple-system,sans-serif';
+ ctx.fillStyle='#8ba0a9';ctx.font='900 18px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';ctx.fillText(leadLabel,72,202);
+ const heroSize=fitText(ctx,heroValue,790,194,100);ctx.fillStyle=light;ctx.font=`900 ${heroSize}px ${condensed}`;ctx.fillText(heroValue,58,412);
+ ctx.fillStyle=light;ctx.font=`900 30px ${condensed}`;ctx.fillText('LINES',72,476);
+ const currentSummary=hasCurrent?`Current lines pushed ${leadValue} lines.`:'Current lines pushed unavailable.';
+ if(!hasCurrent){ctx.fillStyle='#82949c';ctx.font='900 15px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';ctx.fillText('GIT EVIDENCE UNAVAILABLE',72,510);}
+ const activity=safeArray(payload&&payload.activity_days),active=activity.filter(day=>day&&day.recorded_session===true).length;
+ ctx.fillStyle='#8ba0a9';ctx.font='900 14px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';ctx.fillText('BUILD RHYTHM',72,574);ctx.textAlign='right';ctx.fillStyle=light;ctx.fillText(`${active}/${range}`,1008,574);ctx.textAlign='left';
+ const groupSize=Math.max(1,Math.ceil(activity.length/30)),rhythm=activity.length>30?Array.from({length:30},(_,index)=>activity.slice(index*groupSize,index*groupSize+groupSize).some(day=>day&&day.recorded_session===true)):activity.slice(0,30),gap=7,cellWidth=(936-gap*Math.max(0,rhythm.length-1))/Math.max(1,rhythm.length);
+ rhythm.forEach((day,index)=>{const on=day&&day.recorded_session===true,height=on?28+((index*19)%66):8;ctx.fillStyle=on?(index%5===0?light:cyan):'#263840';ctx.fillRect(72+index*(cellWidth+gap),694-height,cellWidth,height);});
+ ctx.fillStyle=cyan;ctx.fillRect(26,710,1054,10);
+ const features=supportingStats(payload,{...options,leadId:lead.id}),labels={efficiency_change:'OUTPUT EFFICIENCY',speed_champion:'FASTEST MODEL',sessions:'AI SESSIONS'};
+ ctx.fillStyle=ink;ctx.font=`900 58px ${condensed}`;ctx.fillText(`${active}/${range}`,72,808);ctx.fillStyle=muted;ctx.font='900 13px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';ctx.fillText('ACTIVE DAYS',72,840);
+ const streak=safeArray(payload&&payload.spotlights).find(stat=>stat&&stat.id==='build_streak'&&stat.available===true);if(streak){ctx.fillStyle=cobalt;ctx.font='900 13px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';ctx.fillText(`${formatStat(streak)} DAY STREAK`,72,884);}
+ ctx.fillStyle='rgba(7,23,31,.18)';ctx.fillRect(270,754,2,142);
+ features.forEach((stat,index)=>{const x=314+index*230;if(index){ctx.fillStyle='rgba(7,23,31,.13)';ctx.fillRect(x-30,754,1,142);}const formatted=formatStat(stat),value=stat.id==='speed_champion'&&formatted!=='—'?`${formatted} TOK/S`:formatted;ctx.fillStyle=ink;ctx.font=`900 42px ${condensed}`;ctx.fillText(value,x,808);ctx.fillStyle=muted;ctx.font='900 12px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';ctx.fillText(labels[stat.id]||String(stat.label||'STAT').toUpperCase(),x,840);if(options.includeUsage!==false&&stat.id==='speed_champion'){const model=safeArray(stat.leaders).map(item=>String(item&&item.model||'').toUpperCase()).filter(Boolean)[0];if(model){ctx.fillStyle=cobalt;ctx.font='900 13px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';ctx.fillText(ellipsize(ctx,model,180),x,884);}}});
+ ctx.fillStyle=ink;ctx.fillRect(72,928,936,3);
+ const usage=payload&&payload.usage||{},agentRows=safeArray(usage.agents),modelRows=safeArray(usage.models),hasUsage=agentRows.length>0||modelRows.length>0;
+ if(options.includeUsage!==false&&hasUsage){
+  if(agentRows.length)drawUsageGroup(ctx,'MOST-USED AGENT',agentRows,72,978,430,cyan);
+  if(modelRows.length)drawUsageGroup(ctx,'GO-TO MODEL',modelRows,578,978,430,cobalt);
+ }
+ ctx.fillStyle='rgba(7,23,31,.13)';ctx.fillRect(540,958,1,230);
+ ctx.fillStyle=ink;ctx.fillRect(18,1220,1062,130);ctx.fillStyle=cyan;ctx.fillRect(1000,1220,80,130);
+ ctx.fillStyle=light;ctx.font='900 24px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';ctx.fillText('BUILD YOURS →',72,1282);
+ ctx.fillStyle='#8ee9f2';ctx.font='800 16px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';ctx.fillText('github.com/splunk/token-meter',72,1316);
+ const agentNames=options.includeUsage===false?[]:agentRows.map(row=>String(row.label||'')).filter(Boolean),modelNames=options.includeUsage===false?[]:modelRows.map(row=>`${row.runtime||'Unknown runtime'} ${row.label||''}`.trim()).filter(Boolean);
+ const sessions=features.find(stat=>stat.id==='sessions'),sessionsSummary=sessions&&sessions.available===true?`AI sessions ${formatStat(sessions)}.`:'AI sessions unavailable.';
+ const identitySummary=name?`Name ${name}. `:'',summary=`${range}-day Builder Field Sheet. ${identitySummary}${currentSummary} ${active} active days. ${sessionsSummary}`;
+ const usageSummary=options.includeUsage===false?'Usage charts excluded.':!hasUsage?'Usage charts unavailable.':`Agent usage: ${agentNames.join(', ')||'unavailable'}. Models: ${modelNames.join(', ')||'unavailable'}; runtime-scoped model usage.`;
+ canvas.setAttribute('aria-label',`${summary} ${usageSummary}`);
+ return {summary};
+}
+function drawPlaceholder(canvas,label){
+ canvas.width=1080;canvas.height=1350;const ctx=canvas.getContext('2d');ctx.fillStyle='#f1eee4';ctx.fillRect(0,0,1080,1350);ctx.fillStyle='#16c1dd';ctx.fillRect(0,0,24,1350);ctx.fillStyle='#10191d';ctx.font='900 28px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';ctx.fillText('TOKEN METER',82,88);ctx.fillStyle='#758087';ctx.font='900 18px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';ctx.fillText(String(label||'PREVIEW'),82,180);canvas.setAttribute('aria-label',`Builder recap preview ${String(label||'unavailable').toLowerCase()}`);
+}
+function setStatus(message,kind=''){const status=$('status');status.textContent=message;status.dataset.kind=kind;}
+function builderOptions(){return {name:builderRecapState.name,includeUsage:builderRecapState.includeUsage};}
+function hasActivity(payload){const sessionActivity=safeArray(payload&&payload.activity_days).some(day=>day&&day.recorded_session===true),lines=safeArray(payload&&payload.spotlights).find(stat=>stat&&stat.id==='lines_pushed');return sessionActivity||Boolean(lines&&lines.available===true&&Number.isFinite(Number(lines.current))&&Number(lines.current)>0);}
+function renderControls(payload){
+ document.querySelectorAll('[data-range]').forEach(button=>button.classList.toggle('on',Number(button.dataset.range)===builderRecapState.range));
+ $('builder-name').value=builderRecapState.name;
+ const usage=payload&&payload.usage||{},usageAvailable=safeArray(usage.agents).length>0||safeArray(usage.models).length>0;$('include-usage').disabled=!usageAvailable;$('include-usage').checked=builderRecapState.includeUsage&&usageAvailable;
+}
+function renderPreview(){
+ const download=$('download');download.disabled=true;builderRecapState.rendered=false;
+ if(builderRecapState.loading||builderRecapState.error||!builderRecapState.payload)return false;
+ if(!hasActivity(builderRecapState.payload)){drawPlaceholder($('poster'),'NO RECORDED ACTIVITY');setStatus('No recorded activity in this period.');return false;}
+ try{drawBuilderRecap($('poster'),builderRecapState.payload,builderOptions());builderRecapState.rendered=true;download.disabled=false;setStatus('');return true;}catch(error){builderRecapState.error='preview';drawPlaceholder($('poster'),'PREVIEW UNAVAILABLE');setStatus('Preview unavailable. Try again.','error');$('retry').hidden=false;return false;}
+}
+async function loadRecap(range=30){
+ range=[7,30,90].includes(Number(range))?Number(range):30;builderRecapState.range=range;
+ if(builderRecapState.controller)builderRecapState.controller.abort();
+ const request=++builderRecapState.request,controller=new AbortController();builderRecapState.controller=controller;builderRecapState.loading=true;builderRecapState.error='';builderRecapState.rendered=false;$('download').disabled=true;$('retry').hidden=true;renderControls(builderRecapState.payload);drawPlaceholder($('poster'),'LOADING');setStatus('Loading local recap evidence…');
+ try{const response=await fetch(`/builder-recap?range=${range}`,{cache:'no-store',signal:controller.signal});if(!response.ok)throw new Error('request');const payload=await response.json();if(request!==builderRecapState.request||controller.signal.aborted)return false;if(!payload||payload.ok!==true)throw new Error('payload');builderRecapState.payload=payload;builderRecapState.loading=false;renderControls(payload);return renderPreview();}
+ catch(error){if(request!==builderRecapState.request||controller.signal.aborted||error&&error.name==='AbortError')return false;builderRecapState.loading=false;builderRecapState.error='request';builderRecapState.payload=null;renderControls(null);drawPlaceholder($('poster'),'PREVIEW UNAVAILABLE');$('retry').hidden=false;setStatus('Unable to load the builder recap. Try again.','error');return false;}
+}
+function resetRecap(){builderRecapState.name='';builderRecapState.includeUsage=true;$('builder-name').value='';$('include-usage').checked=true;return loadRecap(30);}
+function recapFilename(){const day=String(builderRecapState.payload&&builderRecapState.payload.current&&builderRecapState.payload.current.end_day||new Date().toISOString().slice(0,10));return `token-meter-builder-field-sheet-${builderRecapState.range}d-${day}.png`;}
+function downloadRecap(){
+ if(!builderRecapState.rendered||builderRecapState.loading||builderRecapState.error){$('download').disabled=true;return;}
+ const canvas=$('poster');canvas.toBlob(blob=>{if(!blob){builderRecapState.rendered=false;$('download').disabled=true;setStatus('PNG export failed. Try again.','error');return;}let url='';try{url=URL.createObjectURL(blob);const link=document.createElement('a');link.href=url;link.download=recapFilename();link.click();setStatus('PNG downloaded.','success');setTimeout(()=>URL.revokeObjectURL(url),0);}catch(error){if(url)URL.revokeObjectURL(url);builderRecapState.rendered=false;$('download').disabled=true;setStatus('PNG export failed. Try again.','error');}},'image/png');
+}
+document.querySelectorAll('[data-range]').forEach(button=>button.addEventListener('click',()=>loadRecap(Number(button.dataset.range))));
+$('builder-name').addEventListener('input',event=>{builderRecapState.name=sanitizeBuilderName(event.target.value);renderPreview();});
+$('include-usage').addEventListener('change',event=>{builderRecapState.includeUsage=event.target.checked;renderControls(builderRecapState.payload);renderPreview();});
+$('reset').addEventListener('click',resetRecap);$('retry').addEventListener('click',()=>loadRecap(builderRecapState.range));$('download').addEventListener('click',downloadRecap);
+drawPlaceholder($('poster'),'LOADING');loadRecap(30);
+</script>
+</body>
+</html>
