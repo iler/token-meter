@@ -466,6 +466,7 @@ def _supporting_stats(current, previous, spotlight_family):
         _stat("sessions", "AI coding sessions", "activity", True, len(current["sessions"]), len(previous["sessions"]), "sessions", "last recorded activity day", len(current["sessions"]), []),
         _stat("output_pace", "Output pace", "efficiency", current["timed_output"] > 0 and current["timed_seconds"] > 0 and previous["timed_output"] > 0 and previous["timed_seconds"] > 0, current["timed_output"] / current["timed_seconds"] if current["timed_seconds"] else None, previous["timed_output"] / previous["timed_seconds"] if previous["timed_seconds"] else None, "output tokens/s", "dated measured generation samples", current["timed_samples"], []),
         _stat("covered_output_per_dollar", "Covered Output / $", "efficiency", current_efficiency is not None and previous_efficiency is not None, current_efficiency, previous_efficiency, "output tokens/$", "paired cost-covered output and cost", current["paired_output"], []),
+        _stat("covered_spend", "Covered equivalent spend", "cost", current["paired_cost"] > 0, current["paired_cost"] if current["paired_cost"] > 0 else None, previous["paired_cost"] if previous["paired_cost"] > 0 else None, "USD", "paired cost-covered output and cost", current["paired_days"], []),
         _stat("runtimes", "Unique runtimes", "stack", True, len(current["runtimes"]), len(previous["runtimes"]), "runtimes", "known runtime session evidence", len(current["runtimes"]), []),
         _stat("models", "Unique models", "stack", True, len(current["models"]), len(previous["models"]), "models", "runtime-scoped known model evidence", len(current["models"]), []),
         _stat("tool_calls", "Tool calls", "tools", True, current["tool_calls"], previous["tool_calls"], "calls", "dated safe tool evidence", current["tool_calls"], []),
@@ -530,7 +531,8 @@ def build_builder_recap(session_rows, git_days, range_days, *, today=None,
             "days", "measured local Git push evidence", len(current_git["measured"]), []))
     support_order = {"active_days": 0, "sessions": 1, "delivery_active_days": 2,
                      "output_pace": 3, "covered_output_per_dollar": 4,
-                     "runtimes": 5, "models": 6, "tool_calls": 7}
+                     "covered_spend": 5, "runtimes": 6, "models": 7,
+                     "tool_calls": 8}
     supporting = sorted(supporting, key=lambda stat: support_order[stat["id"]])
     return {
         "ok": True,

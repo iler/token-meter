@@ -108,6 +108,63 @@ class BuilderRecapDomainTests(unittest.TestCase):
         self.assertEqual(self.spotlight(result, "efficiency_change")["previous"], 100.0)
         self.assertEqual(self.spotlight(result, "efficiency_change")["delta_pct"], 100.0)
 
+    def test_covered_spend_sums_paired_cost_and_stays_unavailable_when_absent(self):
+        paired = lambda day, output, cost: {
+            "day": day, "model": "gpt-5", "output_tokens": output,
+            "cost_covered_output_tokens": output, "cost_covered_cost": cost,
+        }
+        result = self.recap([
+            self.row("2026-09-13T18:00:00", [
+                paired("2026-09-13", 200, 1.25), paired("2026-09-12", 100, 0.75),
+                paired("2026-08-31", 100, 2.5),
+            ]),
+        ])
+
+        spend = self.supporting(result, "covered_spend")
+        self.assertEqual(spend["family"], "cost")
+        self.assertTrue(spend["available"])
+        self.assertAlmostEqual(spend["current"], 2.0)
+        self.assertAlmostEqual(spend["previous"], 2.5)
+        self.assertEqual(spend["unit"], "USD")
+        self.assertEqual(spend["basis"], "paired cost-covered output and cost")
+        self.assertEqual(spend["sample_count"], 2)
+
+        # Output with no paired cost must not become a measured zero.
+        uncovered = self.recap([
+            self.row("2026-09-13T18:00:00", [{
+                "day": "2026-09-13", "model": "gpt-5", "output_tokens": 900,
+                "cost_covered_output_tokens": 0, "cost_covered_cost": 0,
+            }]),
+        ])
+        self.assertEqual(
+            [stat["id"] for stat in uncovered["supporting"]
+             if stat["id"] == "covered_spend"],
+            [],
+        )
+
+    def test_every_supporting_stat_id_has_a_deterministic_sort_position(self):
+        paired = lambda day, output, cost: {
+            "day": day, "model": "gpt-5", "output_tokens": output,
+            "cost_covered_output_tokens": output, "cost_covered_cost": cost,
+        }
+        result = self.recap([
+            self.row("2026-09-13T18:00:00", [
+                paired("2026-09-13", 200, 1.25), paired("2026-08-31", 100, 2.5),
+            ], duration_s=120, duration_available=True, _performance_samples=[
+                {"day": "2026-09-13", "output_tokens": 400, "generation_s": 4},
+                {"day": "2026-08-31", "output_tokens": 300, "generation_s": 5},
+            ], _tool_evidence={"tools": [{"daily": [
+                {"day": "2026-09-13", "calls": 12},
+            ]}]}),
+        ], git_days=[
+            {"day": "2026-09-13", "available": True, "active": True,
+             "changed_lines": 400},
+        ])
+
+        ordered = [stat["id"] for stat in result["supporting"]]
+        self.assertEqual(ordered, sorted(set(ordered), key=ordered.index))
+        self.assertIn("covered_spend", ordered)
+
     def test_efficiency_comparison_is_unavailable_with_prior_zero_cost(self):
         result = self.recap([
             self.row("2026-09-13T18:00:00", [{
@@ -860,6 +917,12 @@ class BuilderRecapStandalonePageTests(unittest.TestCase):
             "Performance controls",
         )
         self.assertEqual(markup.by_id["performance-preview"][0], "section")
+        logo = markup.by_id["performance-card-logo"]
+        self.assertEqual(logo[0], "img")
+        self.assertEqual(
+            logo[1]["src"], "/assets/brand/logo-splunk-acc-rgb-w.png",
+        )
+        self.assertIn("hidden", logo[1])
         self.assertIn("<div class=studioWorkspace>", page)
         workspace_start = page.index("<div class=studioWorkspace>")
         controls_start = page.index(
@@ -883,13 +946,14 @@ class BuilderRecapStandalonePageTests(unittest.TestCase):
         self.assertNotIn("Builder Recap Studio", page)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required for canvas verification")
-    def test_standalone_canvas_omits_longest_session_and_ghost_period(self):
+    def test_standalone_canvas_formats_and_aligns_metric_values(self):
         page_path = Path(meter.__file__).with_name("performance.html")
         script = f"""
 const fs=require('fs'),page=fs.readFileSync({json.dumps(str(page_path))},'utf8');
 function extract(name){{let start=page.indexOf(`function ${{name}}(`);if(start<0)throw Error(`missing ${{name}}`);let i=page.indexOf('{{',start),depth=0;for(;i<page.length;i++){{if(page[i]==='{{')depth++;else if(page[i]==='}}'&&--depth===0)return page.slice(start,i+1);}}throw Error(`unclosed ${{name}}`);}}
-for(const name of ['safeArray','sanitizeBuilderName','compactNumber','durationLabel','formatStat','ellipsize','fitText','supportingStats','drawUsageGroup','drawBuilderRecap'])eval(extract(name));
-class Context{{constructor(){{this.ops=[];this.font='';}}fillRect(...v){{this.ops.push(['rect',this.fillStyle,...v]);}}fillText(...v){{this.ops.push(['text',String(v[0]),...v.slice(1),this.font]);}}measureText(v){{return {{width:String(v).length*16}};}}beginPath(){{}}arc(){{}}stroke(){{}}save(){{}}restore(){{}}translate(){{}}rotate(){{}}}}
+for(const name of ['safeArray','sanitizeBuilderName','compactNumber','durationLabel','formatStat','formatSpend','ellipsize','fitText','gradientFill','radialFill','fillRoundedRect','setTracking','ditherRegion','supportingStats','drawUsageGroup','drawBuilderRecap'])eval(extract(name));
+class Gradient{{constructor(kind,coords){{this.kind=kind;this.coords=coords;this.stops=[];}}addColorStop(offset,color){{this.stops.push([offset,color]);}}}}
+class Context{{constructor(){{this.ops=[];this.font='';}}fillRect(...v){{this.ops.push(['rect',this.fillStyle,...v]);}}fillText(...v){{this.ops.push(['text',String(v[0]),...v.slice(1),this.font]);}}drawImage(image,...v){{this.ops.push(['image',image.src,...v]);}}createLinearGradient(...c){{return new Gradient('linear',c);}}createRadialGradient(...c){{return new Gradient('radial',c);}}measureText(v){{const size=Number((/([0-9.]+)px/.exec(this.font)||[])[1])||14,narrow=/Narrow|Condensed/.test(this.font);return {{width:String(v).length*size*(narrow?.45:.55)}};}}beginPath(){{}}arc(){{}}stroke(){{}}save(){{}}restore(){{}}translate(){{}}rotate(){{}}}}
 class Canvas{{constructor(){{this.ctx=new Context();this.attrs={{}};}}getContext(){{return this.ctx;}}setAttribute(k,v){{this.attrs[k]=String(v);}}}}
 const payload={{range_days:30,current:{{end_day:'2026-09-13'}},spotlights:[
  {{id:'lines_pushed',available:true,current:184392,unit:'lines'}},
@@ -897,12 +961,12 @@ const payload={{range_days:30,current:{{end_day:'2026-09-13'}},spotlights:[
  {{id:'speed_champion',label:'Fastest model',available:true,current:42.8,unit:'output tokens/s',leaders:[{{model:'gpt-5.3'}}]}},
  {{id:'marathon_session',label:'Longest session',available:true,current:24120,unit:'seconds'}},
  {{id:'build_streak',available:true,current:14,unit:'days'}}
-],supporting:[{{id:'sessions',label:'AI coding sessions',available:true,current:126,unit:'sessions'}}],activity_days:Array.from({{length:30}},(_,i)=>({{recorded_session:i<24}})),usage:{{agents:[],models:[]}}}};
-const canvas=new Canvas();drawBuilderRecap(canvas,payload,{{name:'Ada Builder',includeUsage:true}});
+],supporting:[{{id:'sessions',label:'AI coding sessions',available:true,current:126,unit:'sessions'}},{{id:'covered_spend',label:'Covered equivalent spend',family:'cost',available:true,current:2176.88,previous:null,delta_pct:null,unit:'USD'}}],activity_days:Array.from({{length:30}},(_,i)=>({{recorded_session:i<24}})),usage:{{agents:[],models:[]}}}};
+const canvas=new Canvas();drawBuilderRecap(canvas,payload,{{name:'Ada Builder',includeUsage:true,logo:{{src:'/assets/brand/logo-splunk-acc-rgb-w.png',complete:true,naturalWidth:1024}}}});
 const textOps=canvas.ctx.ops.filter(op=>op[0]==='text');
-const missingPayload=JSON.parse(JSON.stringify(payload));missingPayload.supporting=[];const missingCanvas=new Canvas();drawBuilderRecap(missingCanvas,missingPayload,{{name:'',includeUsage:true}});const missingSessionValue=missingCanvas.ctx.ops.find(op=>op[0]==='text'&&op[2]===774&&op[3]===808);
-const unavailableSpeedPayload=JSON.parse(JSON.stringify(payload));unavailableSpeedPayload.spotlights.find(stat=>stat.id==='speed_champion').available=false;const unavailableSpeedCanvas=new Canvas();drawBuilderRecap(unavailableSpeedCanvas,unavailableSpeedPayload,{{name:'',includeUsage:true}});const unavailableSpeedValue=unavailableSpeedCanvas.ctx.ops.find(op=>op[0]==='text'&&op[2]===544&&op[3]===808);
-console.log(JSON.stringify({{texts:textOps.map(op=>op[1]),labels:textOps.filter(op=>op[3]===840).map(op=>[op[1],op[2]]),ghost:textOps.filter(op=>String(op[4]).includes('330px')),aria:canvas.attrs['aria-label'],missingAria:missingCanvas.attrs['aria-label'],missingSessionValue,unavailableSpeedValue}}));
+const missingPayload=JSON.parse(JSON.stringify(payload));missingPayload.supporting=[];const missingCanvas=new Canvas();drawBuilderRecap(missingCanvas,missingPayload,{{name:'',includeUsage:true}});const missingSessionValue=missingCanvas.ctx.ops.find(op=>op[0]==='text'&&op[2]===633&&op[3]===808);const missingSpendValue=missingCanvas.ctx.ops.find(op=>op[0]==='text'&&op[2]===820&&op[3]===808);
+const unavailableSpeedPayload=JSON.parse(JSON.stringify(payload));unavailableSpeedPayload.spotlights.find(stat=>stat.id==='speed_champion').available=false;const unavailableSpeedCanvas=new Canvas();drawBuilderRecap(unavailableSpeedCanvas,unavailableSpeedPayload,{{name:'',includeUsage:true}});const unavailableSpeedValue=unavailableSpeedCanvas.ctx.ops.find(op=>op[0]==='text'&&op[2]===446&&op[3]===808);
+console.log(JSON.stringify({{texts:textOps.map(op=>op[1]),logos:canvas.ctx.ops.filter(op=>op[0]==='image'),values:textOps.filter(op=>op[3]===808).map(op=>[op[1],op[2],op[3],op[4]]),labels:textOps.filter(op=>op[3]===840).map(op=>[op[1],op[2]]),ghost:textOps.filter(op=>String(op[4]).includes('330px')),aria:canvas.attrs['aria-label'],missingAria:missingCanvas.attrs['aria-label'],missingSessionValue,missingSpendValue,unavailableSpeedValue}}));
 """
         result = subprocess.run(
             ["node", "-e", script], capture_output=True, text=True, check=False,
@@ -910,20 +974,175 @@ console.log(JSON.stringify({{texts:textOps.map(op=>op[1]),labels:textOps.filter(
         self.assertEqual(result.returncode, 0, result.stderr)
         rendered = json.loads(result.stdout)
         self.assertEqual(rendered["labels"], [
-            ["ACTIVE DAYS", 72], ["OUTPUT EFFICIENCY", 314],
-            ["FASTEST MODEL", 544], ["AI SESSIONS", 774],
+            ["ACTIVE DAYS", 72], ["OUTPUT EFFICIENCY", 259],
+            ["FASTEST MODEL", 446], ["AI SESSIONS", 633],
+            ["EQUIV. SPEND", 820],
         ])
         self.assertIn("30D", rendered["texts"])
         self.assertEqual(rendered["ghost"], [])
         visible = " ".join(rendered["texts"])
         self.assertNotIn("LONGEST SESSION", visible)
         self.assertNotIn("6H 42M", visible)
+        self.assertEqual(rendered["texts"].count("LINES PUSHED"), 1)
+        self.assertNotIn("LINES", rendered["texts"])
+        self.assertEqual(rendered["logos"], [[
+            "image", "/assets/brand/logo-splunk-acc-rgb-w.png",
+            72, 44, 148, 59,
+        ]])
+        self.assertIn("TOKEN METER", rendered["texts"])
+        self.assertIn("PERFORMANCE CARD", rendered["texts"])
+        self.assertNotIn("TOKEN METER / PERFORMANCE", rendered["texts"])
         self.assertIn("42.8 TOK/S", rendered["texts"])
+        self.assertIn("2.68 K/$", rendered["texts"])
+        self.assertNotIn("2.68K", rendered["texts"])
+        self.assertEqual(
+            [(op[0], op[1], op[2]) for op in rendered["values"]],
+            [("24/30", 72, 808), ("2.68 K/$", 259, 808),
+             ("42.8 TOK/S", 446, 808), ("126", 633, 808),
+             ("$2.18K", 820, 808)],
+        )
+        self.assertTrue(all("36px" in op[3] for op in rendered["values"]))
         self.assertNotIn("Longest session", rendered["aria"])
         self.assertIn("AI sessions 126.", rendered["aria"])
+        self.assertIn(
+            "Covered equivalent spend $2.18K, an estimate.", rendered["aria"],
+        )
         self.assertIn("AI sessions unavailable.", rendered["missingAria"])
-        self.assertEqual(rendered["missingSessionValue"][1:4], ["—", 774, 808])
-        self.assertEqual(rendered["unavailableSpeedValue"][1:4], ["—", 544, 808])
+        self.assertIn(
+            "Covered equivalent spend unavailable.", rendered["missingAria"],
+        )
+        self.assertEqual(rendered["missingSessionValue"][1:4], ["—", 633, 808])
+        self.assertEqual(rendered["missingSpendValue"][1:4], ["—", 820, 808])
+        self.assertEqual(rendered["unavailableSpeedValue"][1:4], ["—", 446, 808])
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for texture verification")
+    def test_standalone_texture_helpers_dither_gradients_and_degrade_safely(self):
+        page_path = Path(meter.__file__).with_name("performance.html")
+        script = f"""
+const fs=require('fs'),page=fs.readFileSync({json.dumps(str(page_path))},'utf8');
+function extract(name){{let start=page.indexOf(`function ${{name}}(`);if(start<0)throw Error(`missing ${{name}}`);let i=page.indexOf('{{',start),depth=0;for(;i<page.length;i++){{if(page[i]==='{{')depth++;else if(page[i]==='}}'&&--depth===0)return page.slice(start,i+1);}}throw Error(`unclosed ${{name}}`);}}
+for(const name of ['gradientFill','radialFill','fillRoundedRect','ditherRegion'])eval(extract(name));
+const put=[];
+const readable={{
+ getImageData(x,y,width,height){{const data=new Uint8ClampedArray(width*height*4);for(let i=0;i<data.length;i+=4){{data[i]=data[i+1]=data[i+2]=40;data[i+3]=255;}}return {{width,height,data}};}},
+ putImageData(image,x,y){{put.push([x,y,Array.from(image.data)]);}},
+}};
+const dithered=ditherRegion(readable,12,34,16,16,4);
+const channels=put[0][2].filter((_,index)=>index%4!==3),alphas=[...new Set(put[0][2].filter((_,index)=>index%4===3))];
+const missing=ditherRegion({{}},0,0,4,4,4);
+const tainted=ditherRegion({{getImageData(){{throw new Error('tainted');}},putImageData(){{}}}},0,0,4,4,4);
+const roundedOps=[],rounded={{roundRect(...v){{roundedOps.push(['roundRect',...v]);}},beginPath(){{roundedOps.push(['beginPath']);}},fill(){{roundedOps.push(['fill']);}},fillRect(...v){{roundedOps.push(['fillRect',...v]);}}}};
+const usedRound=fillRoundedRect(rounded,10,20,200,12,6);
+const plainOps=[],plain={{fillRect(...v){{plainOps.push(['fillRect',...v]);}}}};
+const usedPlain=fillRoundedRect(plain,10,20,200,12,6);
+console.log(JSON.stringify({{
+ dithered,target:[put[0][0],put[0][1]],levels:[...new Set(channels)].sort((a,b)=>a-b),alphas,
+ missing,tainted,usedRound,roundedOps,usedPlain,plainOps,
+ gradientFallback:gradientFill({{}},0,0,1,1,[[0,'#111111'],[1,'#222222']]),
+ radialFallback:radialFill({{}},0,0,10,[[0,'#333333'],[1,'#444444']]),
+}}));
+"""
+        result = subprocess.run(
+            ["node", "-e", script], capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rendered = json.loads(result.stdout)
+        self.assertTrue(rendered["dithered"])
+        self.assertEqual(rendered["target"], [12, 34])
+        self.assertEqual(rendered["levels"], [0, 85])
+        self.assertEqual(rendered["alphas"], [255])
+        self.assertFalse(rendered["missing"])
+        self.assertFalse(rendered["tainted"])
+        self.assertTrue(rendered["usedRound"])
+        self.assertEqual(rendered["roundedOps"], [
+            ["beginPath"], ["roundRect", 10, 20, 200, 12, 6], ["fill"],
+        ])
+        self.assertFalse(rendered["usedPlain"])
+        self.assertEqual(rendered["plainOps"], [["fillRect", 10, 20, 200, 12]])
+        self.assertEqual(rendered["gradientFallback"], "#222222")
+        self.assertEqual(rendered["radialFallback"], "#444444")
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for dither wiring verification")
+    def test_standalone_canvas_dithers_each_band_before_drawing_any_text(self):
+        page_path = Path(meter.__file__).with_name("performance.html")
+        script = f"""
+const fs=require('fs'),page=fs.readFileSync({json.dumps(str(page_path))},'utf8');
+function extract(name){{let start=page.indexOf(`function ${{name}}(`);if(start<0)throw Error(`missing ${{name}}`);let i=page.indexOf('{{',start),depth=0;for(;i<page.length;i++){{if(page[i]==='{{')depth++;else if(page[i]==='}}'&&--depth===0)return page.slice(start,i+1);}}throw Error(`unclosed ${{name}}`);}}
+for(const name of ['safeArray','sanitizeBuilderName','compactNumber','durationLabel','formatStat','formatSpend','ellipsize','fitText','gradientFill','radialFill','fillRoundedRect','setTracking','ditherRegion','supportingStats','drawUsageGroup','drawBuilderRecap'])eval(extract(name));
+const stops={{addColorStop(){{}}}};
+class Context{{
+ constructor(){{this.ops=[];this.font='';this.bands=[];}}
+ fillRect(...v){{this.ops.push(['rect',...v]);}}
+ fillText(v){{this.ops.push(['text',String(v)]);}}
+ drawImage(){{this.ops.push(['image']);}}
+ createLinearGradient(){{return stops;}}
+ createRadialGradient(){{return stops;}}
+ getImageData(x,y,width,height){{const data=new Uint8ClampedArray(width*height*4);data.fill(100);return {{width,height,data}};}}
+ putImageData(image,x,y){{this.ops.push(['dither',x,y,image.width,image.height]);this.bands.push([x,y,image.width,image.height,[...new Set(image.data.filter((_,i)=>i%4!==3))].sort((a,b)=>a-b)]);}}
+ measureText(v){{const size=Number((/([0-9.]+)px/.exec(this.font)||[])[1])||14,narrow=/Narrow|Condensed/.test(this.font);return {{width:String(v).length*size*(narrow?.45:.55)}};}}
+ beginPath(){{}}arc(){{}}stroke(){{}}save(){{}}restore(){{}}translate(){{}}rotate(){{}}
+}}
+class Canvas{{constructor(){{this.ctx=new Context();this.attrs={{}};}}getContext(){{return this.ctx;}}setAttribute(k,v){{this.attrs[k]=String(v);}}}}
+const payload={{range_days:30,current:{{end_day:'2026-09-13'}},spotlights:[{{id:'lines_pushed',available:true,current:39425,unit:'lines'}}],supporting:[],activity_days:Array.from({{length:30}},(_,i)=>({{recorded_session:i<26}})),usage:{{agents:[{{label:'Codex',share:71}}],models:[{{label:'gpt-5.6',runtime:'Codex',share:69}}]}}}};
+const canvas=new Canvas();drawBuilderRecap(canvas,payload,{{name:'Ada',includeUsage:true}});
+const kinds=canvas.ctx.ops.map(op=>op[0]);
+console.log(JSON.stringify({{
+ bands:canvas.ctx.bands,
+ lastDither:kinds.lastIndexOf('dither'),
+ firstText:kinds.indexOf('text'),
+}}));
+"""
+        result = subprocess.run(
+            ["node", "-e", script], capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rendered = json.loads(result.stdout)
+        self.assertEqual(
+            [band[:4] for band in rendered["bands"]],
+            [[0, 0, 1080, 720], [0, 720, 1080, 500], [0, 1220, 1080, 130]],
+        )
+        # Distinct output values pin each band's quantization step, so changing a
+        # band's `levels` cannot pass silently.
+        self.assertEqual(
+            [band[4] for band in rendered["bands"]],
+            [[98, 118], [85, 102], [98, 118]],
+        )
+        self.assertGreater(rendered["firstText"], -1)
+        self.assertLess(rendered["lastDither"], rendered["firstText"])
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for rhythm verification")
+    def test_standalone_canvas_groups_long_ranges_into_active_rhythm_bars(self):
+        page_path = Path(meter.__file__).with_name("performance.html")
+        script = f"""
+const fs=require('fs'),page=fs.readFileSync({json.dumps(str(page_path))},'utf8');
+function extract(name){{let start=page.indexOf(`function ${{name}}(`);if(start<0)throw Error(`missing ${{name}}`);let i=page.indexOf('{{',start),depth=0;for(;i<page.length;i++){{if(page[i]==='{{')depth++;else if(page[i]==='}}'&&--depth===0)return page.slice(start,i+1);}}throw Error(`unclosed ${{name}}`);}}
+for(const name of ['safeArray','sanitizeBuilderName','compactNumber','durationLabel','formatStat','formatSpend','ellipsize','fitText','gradientFill','radialFill','fillRoundedRect','setTracking','ditherRegion','supportingStats','drawUsageGroup','drawBuilderRecap'])eval(extract(name));
+class Gradient{{constructor(kind){{this.kind=kind;this.stops=[];}}addColorStop(offset,color){{this.stops.push([offset,color]);}}}}
+class Context{{constructor(){{this.ops=[];this.font='';}}fillRect(...v){{this.ops.push(['rect',this.fillStyle,...v]);}}fillText(...v){{this.ops.push(['text',String(v[0]),...v.slice(1),this.font]);}}drawImage(){{}}createLinearGradient(){{return new Gradient('linear');}}createRadialGradient(){{return new Gradient('radial');}}measureText(v){{const size=Number((/([0-9.]+)px/.exec(this.font)||[])[1])||14,narrow=/Narrow|Condensed/.test(this.font);return {{width:String(v).length*size*(narrow?.45:.55)}};}}beginPath(){{}}arc(){{}}stroke(){{}}save(){{}}restore(){{}}translate(){{}}rotate(){{}}}}
+class Canvas{{constructor(){{this.ctx=new Context();this.attrs={{}};}}getContext(){{return this.ctx;}}setAttribute(k,v){{this.attrs[k]=String(v);}}}}
+const payload={{range_days:90,current:{{end_day:'2026-09-13'}},spotlights:[{{id:'lines_pushed',available:true,current:140514,unit:'lines'}}],supporting:[],activity_days:Array.from({{length:90}},(_,i)=>({{recorded_session:i<76}})),usage:{{agents:[],models:[]}}}};
+const canvas=new Canvas();drawBuilderRecap(canvas,payload,{{name:'',includeUsage:true}});
+const rhythmBars=canvas.ctx.ops.filter(op=>op[0]==='rect'&&op[2]>=72&&op[2]<1008&&op[3]+op[5]===694);
+console.log(JSON.stringify({{
+ total:rhythmBars.length,
+ active:rhythmBars.filter(op=>op[1]&&op[1].kind==='linear').length,
+ inactive:rhythmBars.filter(op=>op[1]==='rgba(159,180,189,.3)').map(op=>op[5]),
+ texts:canvas.ctx.ops.filter(op=>op[0]==='text').map(op=>op[1]),
+ aria:canvas.attrs['aria-label'],
+}}));
+"""
+        result = subprocess.run(
+            ["node", "-e", script], capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rendered = json.loads(result.stdout)
+        self.assertEqual(rendered["total"], 30)
+        self.assertEqual(rendered["active"], 26)
+        self.assertEqual(rendered["inactive"], [8, 8, 8, 8])
+        self.assertIn("76/90", rendered["texts"])
+        self.assertIn("LAST 90 DAYS", rendered["texts"])
+        # Bucketed bars must disclose their grouping instead of implying one day each.
+        self.assertIn("Rhythm chart groups 3 days per bar.", rendered["aria"])
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is required for canvas verification")
     def test_standalone_canvas_is_a_linkedin_scale_builder_signal(self):
@@ -931,11 +1150,12 @@ console.log(JSON.stringify({{texts:textOps.map(op=>op[1]),labels:textOps.filter(
         script = f"""
 const fs=require('fs'),page=fs.readFileSync({json.dumps(str(page_path))},'utf8');
 function extract(name){{let start=page.indexOf(`function ${{name}}(`);if(start<0)throw Error(`missing ${{name}}`);if(page.slice(start-6,start)==='async ')start-=6;let i=page.indexOf('{{',start),depth=0;for(;i<page.length;i++){{if(page[i]==='{{')depth++;else if(page[i]==='}}'&&--depth===0)return page.slice(start,i+1);}}throw Error(`unclosed ${{name}}`);}}
-	for(const name of ['safeArray','sanitizeBuilderName','compactNumber','durationLabel','formatStat','ellipsize','fitText','supportingStats','drawUsageGroup','drawBuilderRecap','hasActivity'])eval(extract(name));
-class Context{{constructor(){{this.ops=[];this.font='';this.lineWidth=1;}}fillRect(...v){{this.ops.push(['rect',this.fillStyle,...v]);}}fillText(...v){{this.ops.push(['text',String(v[0]),...v.slice(1),this.font]);}}measureText(v){{return {{width:String(v).length*16}};}}beginPath(){{}}arc(...v){{this.ops.push(['arc',this.strokeStyle,...v]);}}stroke(){{this.ops.push(['stroke',this.strokeStyle,this.lineWidth]);}}save(){{}}restore(){{}}translate(){{}}rotate(){{}}}}
+	for(const name of ['safeArray','sanitizeBuilderName','compactNumber','durationLabel','formatStat','formatSpend','ellipsize','fitText','gradientFill','radialFill','fillRoundedRect','setTracking','ditherRegion','supportingStats','drawUsageGroup','drawBuilderRecap','hasActivity'])eval(extract(name));
+class Gradient{{constructor(kind,coords){{this.kind=kind;this.coords=coords;this.stops=[];}}addColorStop(offset,color){{this.stops.push([offset,color]);}}}}
+class Context{{constructor(){{this.ops=[];this.font='';this.lineWidth=1;}}fillRect(...v){{this.ops.push(['rect',this.fillStyle,...v]);}}fillText(...v){{this.ops.push(['text',String(v[0]),...v.slice(1),this.font]);}}createLinearGradient(...c){{return new Gradient('linear',c);}}createRadialGradient(...c){{return new Gradient('radial',c);}}measureText(v){{const size=Number((/([0-9.]+)px/.exec(this.font)||[])[1])||14,narrow=/Narrow|Condensed/.test(this.font);return {{width:String(v).length*size*(narrow?.45:.55)}};}}beginPath(){{}}arc(...v){{this.ops.push(['arc',this.strokeStyle,...v]);}}stroke(){{this.ops.push(['stroke',this.strokeStyle,this.lineWidth]);}}save(){{}}restore(){{}}translate(){{}}rotate(){{}}}}
 class Canvas{{constructor(){{this.ctx=new Context();this.attrs={{}};this.width=1;this.height=1;}}getContext(){{return this.ctx;}}setAttribute(k,v){{this.attrs[k]=String(v);}}}}
 	const payload={{ok:true,private_sentinel:'prompt://must-not-draw',range_days:30,current:{{start_day:'2026-08-15',end_day:'2026-09-13'}},spotlight_default:'efficiency_change',spotlights:[{{id:'efficiency_change',label:'Output efficiency',family:'efficiency',available:true,current:2680,previous:1942,delta_pct:38,unit:'output tokens/$',basis:'paired cost-covered output and cost'}},{{id:'speed_champion',label:'Fastest model',family:'efficiency',available:true,current:42.8,previous:null,delta_pct:null,unit:'output tokens/s',basis:'weighted measured generation samples',leaders:[{{runtime:'Codex',model:'gpt-5.3'}}]}},{{id:'lines_pushed',label:'Lines pushed',family:'delivery',available:true,current:184392,previous:120000,delta_pct:53.66,unit:'lines',basis:'added plus deleted text lines from successful local pushes'}},{{id:'marathon_session',label:'Longest session',family:'activity',available:true,current:24120,previous:18000,delta_pct:34,unit:'seconds',basis:'active execution duration'}},{{id:'build_streak',label:'Build streak',family:'consistency',available:true,current:14,previous:8,delta_pct:75,unit:'days',basis:'consecutive local days'}}],supporting:[{{id:'active_days',label:'Active days',family:'consistency',available:true,current:24,previous:20,delta_pct:20,unit:'days'}},{{id:'sessions',label:'AI coding sessions',family:'activity',available:true,current:126,previous:91,delta_pct:38.5,unit:'sessions'}},{{id:'delivery_active_days',label:'Delivery-active days',family:'delivery',available:true,current:12,previous:8,delta_pct:50,unit:'days'}},{{id:'output_pace',label:'Output pace',family:'efficiency',available:true,current:31.4,previous:28,delta_pct:12,unit:'output tokens/s'}}],activity_days:Array.from({{length:30}},(_,i)=>({{recorded_session:i<24}})),usage:{{agents:[{{label:'Codex',count:68,share:54}},{{label:'Claude',count:39,share:31}},{{label:'Cursor',count:19,share:15}}],models:[{{label:'gpt-5.3',runtime:'Codex',count:74,share:49}},{{label:'sonnet-4.5',runtime:'Claude',count:48,share:32}},{{label:'gpt-5.2',runtime:'Codex',count:29,share:19}}]}},coverage:{{git:{{available:true}},cost:{{available:true,eligible:22,total:30}},output:{{available:true,eligible:22,total:30}},timing:{{available:true,eligible:14,total:18}}}},privacy:{{content_included:false,project_identity_included:false}}}};
-		const canvas=new Canvas(),result=drawBuilderRecap(canvas,payload,{{name:' Ada\\n Builder ',includeUsage:true}}),texts=canvas.ctx.ops.filter(op=>op[0]==='text').map(op=>op[1]),arcs=canvas.ctx.ops.filter(op=>op[0]==='arc'),bars=canvas.ctx.ops.filter(op=>op[0]==='rect'&&(op[5]===12||op[5]===6)),rhythmBars=canvas.ctx.ops.filter(op=>op[0]==='rect'&&op[2]>=72&&op[2]<1008&&op[3]+op[5]===694),heroFields=canvas.ctx.ops.filter(op=>op[0]==='rect'&&op[1]==='#07171f'&&op[2]===0&&op[3]===0&&op[4]===1080&&op[5]>=700),lowerFields=canvas.ctx.ops.filter(op=>op[0]==='rect'&&op[1]==='#f1eee4'&&op[2]===0&&op[3]>=700&&op[4]===1080&&op[5]>=450),nameOp=canvas.ctx.ops.find(op=>op[0]==='text'&&op[1]==='ADA BUILDER'),heroOp=canvas.ctx.ops.find(op=>op[0]==='text'&&op[3]===412),efficiencyLabelOp=canvas.ctx.ops.find(op=>op[0]==='text'&&op[1]==='OUTPUT EFFICIENCY'&&op[3]===840),metricLabelOps=canvas.ctx.ops.filter(op=>op[0]==='text'&&op[3]===840),ghostPeriodOps=canvas.ctx.ops.filter(op=>op[0]==='text'&&String(op[4]).includes('330px'));
+		const canvas=new Canvas(),result=drawBuilderRecap(canvas,payload,{{name:' Ada\\n Builder ',includeUsage:true}}),texts=canvas.ctx.ops.filter(op=>op[0]==='text').map(op=>op[1]),arcs=canvas.ctx.ops.filter(op=>op[0]==='arc'),bars=canvas.ctx.ops.filter(op=>op[0]==='rect'&&(op[5]===12||op[5]===6)),rhythmBars=canvas.ctx.ops.filter(op=>op[0]==='rect'&&op[2]>=72&&op[2]<1008&&op[3]+op[5]===694),heroFields=canvas.ctx.ops.filter(op=>op[0]==='rect'&&op[1]&&op[1].kind==='linear'&&op[2]===0&&op[3]===0&&op[4]===1080&&op[5]>=700),lowerFields=canvas.ctx.ops.filter(op=>op[0]==='rect'&&op[1]&&op[1].kind==='linear'&&op[2]===0&&op[3]>=700&&op[4]===1080&&op[5]>=450),nameOp=canvas.ctx.ops.find(op=>op[0]==='text'&&op[1]==='ADA BUILDER'),heroOp=canvas.ctx.ops.find(op=>op[0]==='text'&&op[3]===486),efficiencyLabelOp=canvas.ctx.ops.find(op=>op[0]==='text'&&op[1]==='OUTPUT EFFICIENCY'&&op[3]===840),metricLabelOps=canvas.ctx.ops.filter(op=>op[0]==='text'&&op[3]===840),ghostPeriodOps=canvas.ctx.ops.filter(op=>op[0]==='text'&&String(op[4]).includes('330px'));
 		const negativePayload=JSON.parse(JSON.stringify(payload));negativePayload.spotlights.find(stat=>stat.id==='lines_pushed').delta_pct=-25;const negativeCanvas=new Canvas();drawBuilderRecap(negativeCanvas,negativePayload,{{name:'',includeUsage:true}});
 		const unavailablePayload=JSON.parse(JSON.stringify(payload));Object.assign(unavailablePayload.spotlights.find(stat=>stat.id==='lines_pushed'),{{available:false,current:null,previous:null,delta_pct:null}});unavailablePayload.coverage.git.available=false;const unavailableCanvas=new Canvas();drawBuilderRecap(unavailableCanvas,unavailablePayload,{{name:'',includeUsage:true}});
 	const flatPayload=JSON.parse(JSON.stringify(payload));flatPayload.spotlights.find(stat=>stat.id==='lines_pushed').delta_pct=0;const flatCanvas=new Canvas();drawBuilderRecap(flatCanvas,flatPayload,{{name:'',includeUsage:true}});const flatTexts=flatCanvas.ctx.ops.filter(op=>op[0]==='text').map(op=>op[1]);
@@ -953,33 +1173,47 @@ class Canvas{{constructor(){{this.ctx=new Context();this.attrs={{}};this.width=1
         rendered = json.loads(result.stdout)
         self.assertEqual(rendered["size"], [1080, 1350])
         for text in (
-            "TOKEN METER / PERFORMANCE", "30D", "ADA BUILDER", "LINES PUSHED",
-            "184,392", "OUTPUT EFFICIENCY", "2.68K", "BUILD RHYTHM", "24/30",
+            "TOKEN METER", "PERFORMANCE CARD", "LAST 30 DAYS", "30D",
+            "ADA BUILDER", "LINES PUSHED",
+            "184,392", "OUTPUT EFFICIENCY", "2.68 K/$", "24/30",
             "ACTIVE DAYS", "14 DAY STREAK", "FASTEST MODEL", "42.8 TOK/S",
-            "GPT-5.3", "AI SESSIONS", "126",
+            "GPT-5.3", "AI SESSIONS", "126", "EQUIV. SPEND",
             "MOST-USED AGENT", "GO-TO MODEL", "CODEX", "54%", "49%",
             "BUILD YOURS →", "github.com/splunk/token-meter",
         ):
             self.assertIn(text, rendered["texts"])
-        self.assertEqual(rendered["nameOp"][1:4], ["ADA BUILDER", 72, 126])
-        self.assertIn("46px", rendered["nameOp"][4])
+        self.assertEqual(rendered["nameOp"][1:4], ["ADA BUILDER", 72, 250])
+        self.assertIn("44px", rendered["nameOp"][4])
         self.assertEqual(rendered["heroOp"][1], "184,392")
         self.assertIsNotNone(rendered["efficiencyLabelOp"])
         self.assertEqual(
             [(op[1], op[2]) for op in rendered["metricLabelOps"]],
-            [("ACTIVE DAYS", 72), ("OUTPUT EFFICIENCY", 314),
-             ("FASTEST MODEL", 544), ("AI SESSIONS", 774)],
+            [("ACTIVE DAYS", 72), ("OUTPUT EFFICIENCY", 259),
+             ("FASTEST MODEL", 446), ("AI SESSIONS", 633),
+             ("EQUIV. SPEND", 820)],
         )
         self.assertEqual(rendered["ghostPeriodOps"], [])
         self.assertGreaterEqual(len(rendered["bars"]), 6)
         self.assertEqual(len(rendered["rhythmBars"]), 30)
         for index, bar in enumerate(rendered["rhythmBars"][:24]):
-            self.assertEqual(bar[1], "#f8f5ec" if index % 5 == 0 else "#00bceb")
+            self.assertEqual(bar[1]["kind"], "linear")
+            self.assertEqual(
+                [stop[1] for stop in bar[1]["stops"]],
+                ["#8ee9f2", "#00bceb", "rgba(64,84,214,.72)"],
+            )
             self.assertEqual(bar[5], 28 + ((index * 19) % 66))
         for bar in rendered["rhythmBars"][24:]:
-            self.assertEqual((bar[1], bar[5]), ("#263840", 8))
+            self.assertEqual((bar[1], bar[5]), ("rgba(159,180,189,.3)", 8))
         self.assertTrue(rendered["heroFields"])
         self.assertTrue(rendered["lowerFields"])
+        self.assertEqual(
+            [stop[1] for stop in rendered["heroFields"][0][1]["stops"]],
+            ["#0d2c3d", "#081a27", "#040d14"],
+        )
+        self.assertEqual(
+            [stop[1] for stop in rendered["lowerFields"][0][1]["stops"]],
+            ["#f8f5ee", "#f1eee4", "#e4e0d3"],
+        )
         self.assertFalse(rendered["arcs"])
         for raw_count in ("68", "39", "19", "74", "48", "29"):
             self.assertNotIn(raw_count, rendered["texts"])
@@ -1048,23 +1282,84 @@ class Element{{constructor(){{this.disabled=true;this.hidden=true;this.textConte
 const elements={{download:new Element(),retry:new Element(),poster:new Element(),status:new Element()}},$=id=>elements[id];
 elements.poster.getContext=()=>({{}});elements.poster.setAttribute=()=>{{}};
 const builderRecapState={{payload:{{activity_days:[{{recorded_session:true}}]}},loading:false,error:'',rendered:false}};
-let shouldFail=false;function hasActivity(){{return true;}}function drawBuilderRecap(){{if(shouldFail)throw Error('private failure');}}function drawPlaceholder(){{}}function builderOptions(){{return {{}};}}function setStatus(message,kind=''){{elements.status.textContent=message;elements.status.dataset.kind=kind;}}
-eval(extract('renderPreview'));
+const logo={{complete:false,naturalWidth:0}};let shouldFail=false;function hasActivity(){{return true;}}function drawBuilderRecap(){{if(shouldFail)throw Error('private failure');}}function drawPlaceholder(){{}}function builderOptions(){{return {{logo}};}}function setStatus(message,kind=''){{elements.status.textContent=message;elements.status.dataset.kind=kind;}}
+for(const name of ['showLogoFailure','renderPreview'])eval(extract(name));
+const waitingReady=renderPreview(),waiting={{ready:waitingReady,download:elements.download.disabled,status:elements.status.textContent}};
+logo.complete=true;logo.naturalWidth=1024;
 const ready=renderPreview(),success={{ready,download:elements.download.disabled,status:elements.status.textContent,kind:elements.status.dataset.kind}};
 shouldFail=true;const failed=renderPreview(),failure={{failed,download:elements.download.disabled,retry:elements.retry.hidden,status:elements.status.textContent,kind:elements.status.dataset.kind}};
-console.log(JSON.stringify({{success,failure}}));
+console.log(JSON.stringify({{waiting,success,failure}}));
 """
         result = subprocess.run(
             ["node", "-e", script], capture_output=True, text=True, check=False,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
         rendered = json.loads(result.stdout)
+        self.assertEqual(rendered["waiting"], {
+            "ready": False, "download": True,
+            "status": "Loading local brand asset…",
+        })
         self.assertEqual(rendered["success"], {
             "ready": True, "download": False, "status": "", "kind": "",
         })
         self.assertEqual(rendered["failure"], {
             "failed": False, "download": True, "retry": False,
             "status": "Preview unavailable. Try again.", "kind": "error",
+        })
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is required for logo recovery verification")
+    def test_standalone_logo_error_retries_local_asset_before_enabling_download(self):
+        page_path = Path(meter.__file__).with_name("performance.html")
+        script = f"""
+const fs=require('fs'),page=fs.readFileSync({json.dumps(str(page_path))},'utf8');
+function extract(name){{let start=page.indexOf(`function ${{name}}(`);if(start<0)return '';let i=page.indexOf('{{',start),depth=0;for(;i<page.length;i++){{if(page[i]==='{{')depth++;else if(page[i]==='}}'&&--depth===0)return page.slice(start,i+1);}}throw Error(`unclosed ${{name}}`);}}
+class Element{{
+ constructor(){{this.disabled=true;this.hidden=true;this.textContent='';this.dataset={{}};this.listeners={{}};}}
+ addEventListener(type,handler){{this.listeners[type]=handler;}}
+ dispatch(type){{if(this.listeners[type])this.listeners[type]({{target:this}});}}
+}}
+class Logo extends Element{{
+ constructor(){{super();this.complete=false;this.naturalWidth=0;this._src='/assets/brand/logo-splunk-acc-rgb-w.png';this.sourceWrites=[];this.sourceRemovals=0;}}
+ get src(){{return this._src;}}
+ set src(value){{this._src=String(value);this.sourceWrites.push(this._src);}}
+ getAttribute(name){{return name==='src'?this._src:null;}}
+ removeAttribute(name){{if(name==='src'){{this._src='';this.sourceRemovals++;}}}}
+}}
+const elements={{download:new Element(),retry:new Element(),reset:new Element(),poster:new Element(),status:new Element(),'performance-card-logo':new Logo()}},$=id=>elements[id];
+elements.poster.getContext=()=>({{}});elements.poster.setAttribute=()=>{{}};
+const builderRecapState={{range:30,payload:{{activity_days:[{{recorded_session:true}}]}},loading:false,error:'',rendered:false,logoError:false}};
+let recapLoads=0;function loadRecap(){{recapLoads++;}}function resetRecap(){{}}function downloadRecap(){{}}function hasActivity(){{return true;}}function drawBuilderRecap(){{}}function drawPlaceholder(){{}}function builderOptions(){{return {{logo:elements['performance-card-logo']}};}}function setStatus(message,kind=''){{elements.status.textContent=message;elements.status.dataset.kind=kind;}}
+for(const name of ['showLogoFailure','retryLogo','handleLogoLoad','renderPreview']){{const source=extract(name);if(source)eval(source);}}
+for(const line of page.split('\\n').filter(line=>line.includes("$('retry').addEventListener")||line.includes("$('performance-card-logo').addEventListener")))eval(line);
+renderPreview();
+const logo=elements['performance-card-logo'];logo.complete=true;logo.dispatch('error');
+const failure={{download:elements.download.disabled,retry:elements.retry.hidden,status:elements.status.textContent,kind:elements.status.dataset.kind}};
+elements.retry.dispatch('click');
+const retrying={{download:elements.download.disabled,retry:elements.retry.hidden,status:elements.status.textContent,kind:elements.status.dataset.kind,source:logo.src,sourceWrites:logo.sourceWrites,sourceRemovals:logo.sourceRemovals,recapLoads}};
+logo.complete=true;logo.naturalWidth=1024;logo.dispatch('load');
+const recovered={{rendered:builderRecapState.rendered,download:elements.download.disabled,retry:elements.retry.hidden,status:elements.status.textContent,kind:elements.status.dataset.kind}};
+console.log(JSON.stringify({{failure,retrying,recovered}}));
+"""
+        result = subprocess.run(
+            ["node", "-e", script], capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rendered = json.loads(result.stdout)
+        self.assertEqual(rendered["failure"], {
+            "download": True, "retry": False,
+            "status": "Local brand asset unavailable. Try again.",
+            "kind": "error",
+        })
+        self.assertEqual(rendered["retrying"], {
+            "download": True, "retry": True,
+            "status": "Loading local brand asset…", "kind": "",
+            "source": "/assets/brand/logo-splunk-acc-rgb-w.png",
+            "sourceWrites": ["/assets/brand/logo-splunk-acc-rgb-w.png"],
+            "sourceRemovals": 1, "recapLoads": 0,
+        })
+        self.assertEqual(rendered["recovered"], {
+            "rendered": True, "download": False, "retry": True,
+            "status": "", "kind": "",
         })
 
     def test_standalone_export_contract_is_png_only(self):
