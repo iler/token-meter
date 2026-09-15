@@ -849,6 +849,25 @@ class BuilderRecapStandalonePageTests(unittest.TestCase):
             self.assertIn(b"performance.html is missing", missing["body"])
             self.assertNotIn(str(tmp).encode(), missing["body"])
 
+    def test_standalone_page_declares_inline_svg_favicon(self):
+        class IconInventory(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.icons = []
+
+            def handle_starttag(self, tag, attrs):
+                attributes = dict(attrs)
+                if tag == "link" and "icon" in attributes.get("rel", "").split():
+                    self.icons.append(attributes)
+
+        page = Path(meter.__file__).with_name("performance.html").read_text()
+        markup = IconInventory()
+        markup.feed(page)
+
+        self.assertEqual(len(markup.icons), 1)
+        self.assertEqual(markup.icons[0]["type"], "image/svg+xml")
+        self.assertTrue(markup.icons[0]["href"].startswith("data:image/svg+xml,"))
+
     def test_standalone_studio_has_the_approved_controls_and_no_remote_assets(self):
         page_path = Path(meter.__file__).with_name("performance.html")
         self.assertTrue(page_path.is_file())
