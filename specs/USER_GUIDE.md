@@ -274,7 +274,7 @@ require `sudo` or security-control changes.
 ## Data and Evidence
 
 Token Meter reads local runtime stores: JSONL traces for Claude, Codex, Cursor,
-Kiro, and Pi; read-only SQLite enrichment for Cursor, OpenCode,
+Kiro, Pi, and Oh My Pi (OMP); read-only SQLite enrichment for Cursor, OpenCode,
 and Hermes Agent; and
 runtime-owned metadata needed to join a visible session to its trace.
 
@@ -311,6 +311,30 @@ not establish them. A provider resource identifier, such as an
 application-profile reference, is replaced with a safe generic model label;
 Token Meter does not infer or price a foundation model from it.
 
+### Oh My Pi (OMP) sessions
+
+OMP discovery reads only OMP-owned JSONL session files. Its default root is
+`~/.omp/agent`; set `OMP_CODING_AGENT_DIR` when OMP stores its local agent
+files elsewhere. An OMP file may open with a fixed-size title entry before the
+session header; Token Meter accepts that preamble and still requires the
+session header. OMP usage is reported under its own `omp` runtime identity and
+stays separate from Pi even when both use the same provider and model.
+
+OMP records auxiliary model calls, such as automatic reasoning-level
+classification, as `model_usage` entries. They are independent billed calls,
+so Token Meter counts each one exactly once, alongside ordinary assistant
+usage, and keeps the recorded purpose in the execution detail. Advisor and
+subagent transcripts live in nested files below the discovered session roots;
+Token Meter does not discover them, so their usage can never be counted twice.
+
+OMP sessions show the title recorded by OMP, bounded and stripped of message
+content. Recorded input, output, cache, cost, and tool-call evidence can be
+shown when present. Wait is inferred from the user-to-assistant timestamps.
+Context pressure, output speed, cache savings, and semantic token
+classification remain unavailable because OMP's records do not establish them.
+Account-bearing provider resources, such as application-profile references,
+are replaced with a safe generic model label, exactly as for Pi.
+
 ### Costs and estimates
 
 Token Meter uses effective-dated provider/model price periods. Reinstalling
@@ -321,11 +345,11 @@ all history.
 Codex costs use public API-equivalent rates and remain estimates because
 subscription billing can differ. Cursor input, output, pace, and cost are local
 proxies derived from persisted evidence and remain labeled `est`; cache and
-hidden model work may be unavailable. Pi cost is the local estimate persisted
-in its session record, never a Token Meter price-table lookup. Token Meter does
-not display Pi application-profile identifiers, and leaves Pi context pressure,
-semantic token classification, and cache savings unavailable when the trace
-does not record that evidence.
+hidden model work may be unavailable. Pi and OMP cost is the local estimate
+persisted in the session record, never a Token Meter price-table lookup. Token
+Meter does not display Pi or OMP application-profile identifiers, and leaves
+their context pressure, semantic token classification, and cache savings
+unavailable when the trace does not record that evidence.
 Token Meter reports recorded evidence, not a pre-flight prediction.
 
 ## Privacy
@@ -376,6 +400,14 @@ is under `~/.pi/agent` or the directory named by `PI_CODING_AGENT_DIR`. Token
 Meter ignores files without a Pi session header, malformed files, symlinks, and
 cloud-only conversations. It does not need an API key or a provider account to
 read local Pi evidence.
+
+### OMP sessions do not appear
+
+Run a normal Oh My Pi session, then confirm that its local JSONL evidence is
+under `~/.omp/agent` or the directory named by `OMP_CODING_AGENT_DIR`. Token
+Meter ignores files without an OMP session header, malformed files, symlinks,
+nested advisor and subagent transcripts, and cloud-only conversations. It does
+not need an API key or a provider account to read local OMP evidence.
 
 ### Source changes do not appear
 

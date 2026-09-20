@@ -186,6 +186,10 @@ from token_meter.runtimes.pi import (
     PiRuntimeAdapter,
     PiRuntimeAdapterProxy,
 )
+from token_meter.runtimes.omp import (
+    OMPRuntimeAdapter,
+    OMPRuntimeAdapterProxy,
+)
 from token_meter.runtimes.hermes import (
     HermesRuntimeAdapter,
     HermesRuntimeAdapterProxy,
@@ -251,6 +255,9 @@ KIRO_AGENT_STORAGE = _default_kiro_agent_storage_root(
 PI_AGENT_DIR = os.path.abspath(os.path.expanduser(
     os.environ.get("PI_CODING_AGENT_DIR", "~/.pi/agent")
 ))
+OMP_AGENT_DIR = os.path.abspath(os.path.expanduser(
+    os.environ.get("OMP_CODING_AGENT_DIR", "~/.omp/agent")
+))
 def hermes_state_db_path(environ=None):
     environ = os.environ if environ is None else environ
     state_db = str(environ.get("HERMES_STATE_DB") or "").strip()
@@ -299,7 +306,7 @@ SESSION_CLAUDE_MODEL_ID_RE = re.compile(
     re.IGNORECASE,
 )
 HERMES_MODEL_IDENTITY_LABEL = "Bedrock application profile"
-BUDGET_PROVIDERS = ("claude", "codex", "cursor", "opencode", "kiro", "pi", "hermes")
+BUDGET_PROVIDERS = ("claude", "codex", "cursor", "opencode", "kiro", "pi", "omp", "hermes")
 DEFAULT_RUNTIME_BUDGET = 0.0
 DEFAULT_BUDGET_THRESHOLDS = (80, 90, 100)
 DEFAULT_SESSION_BUDGET = 10.0
@@ -2807,6 +2814,57 @@ def recompute_pi(source):
     return _pi_native_adapter().recompute_legacy(source)
 
 
+_omp_native_adapters = {}
+
+
+def _omp_compatibility():
+    return {
+        "add_model_daily": add_model_daily,
+        "add_model_summary": add_model_summary,
+        "analysis_block": analysis_block,
+        "build_state": build_state,
+        "context_sample_limit": CURRENT_SESSION_CONTEXT_SAMPLES,
+        "metric_availability": metric_availability,
+        "summarize_tool_evidence": summarize_tool_evidence,
+        "summary_row": summary_row,
+        "tool_identity": tool_identity,
+        "tool_summary": tool_summary,
+        "trace_event": trace_event,
+    }
+
+
+def _omp_adapter_for(agent_dir=None):
+    path = os.path.abspath(os.path.expanduser(agent_dir or OMP_AGENT_DIR))
+    adapter = _omp_native_adapters.get(path)
+    if adapter is None:
+        adapter = OMPRuntimeAdapter(
+            path,
+            project_resolver=home_shorten,
+            compatibility=_omp_compatibility(),
+            path_cache=_recursive_path_cache,
+        )
+        _omp_native_adapters[path] = adapter
+        if len(_omp_native_adapters) > 8:
+            oldest = next(iter(_omp_native_adapters))
+            if oldest != path:
+                _omp_native_adapters.pop(oldest, None)
+    return adapter
+
+
+def _omp_native_adapter():
+    return _omp_adapter_for()
+
+
+def omp_session_sources(agent_dir=None):
+    return list(_omp_adapter_for(agent_dir).discover_legacy(
+        DiscoveryContext(home=os.path.expanduser("~"))
+    ))
+
+
+def recompute_omp(source):
+    return _omp_native_adapter().recompute_legacy(source)
+
+
 _hermes_native_adapters = {}
 
 
@@ -4880,6 +4938,7 @@ def runtime_registry():
                 OpenCodeRuntimeAdapterProxy(lambda: _opencode_native_adapter()),
                 KiroRuntimeAdapterProxy(lambda: _kiro_native_adapter()),
                 PiRuntimeAdapterProxy(lambda: _pi_native_adapter()),
+                OMPRuntimeAdapterProxy(lambda: _omp_native_adapter()),
                 HermesRuntimeAdapterProxy(lambda: _hermes_native_adapter()),
             ))
     return _RUNTIME_REGISTRY
@@ -5504,6 +5563,10 @@ def kiro_summary(source, objs=None):
 
 def pi_summary(source, objs=None):
     return _pi_native_adapter().summarize_legacy(source, objs)
+
+
+def omp_summary(source, objs=None):
+    return _omp_native_adapter().summarize_legacy(source, objs)
 
 
 def hermes_summary(source, objs=None):
@@ -7554,6 +7617,8 @@ def _source_inventory_roots():
         KIRO_AGENT_STORAGE,
         PI_AGENT_DIR,
         os.path.join(PI_AGENT_DIR, "sessions"),
+        OMP_AGENT_DIR,
+        os.path.join(OMP_AGENT_DIR, "sessions"),
     )
 
 

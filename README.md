@@ -9,7 +9,7 @@
 </p>
 
 Token Meter is a local-first observability dashboard for AI coding agents. It
-turns session evidence from Claude, Codex, Cursor, OpenCode, Kiro, and Pi into one
+turns session evidence from Claude, Codex, Cursor, OpenCode, Kiro, Pi, and Oh My Pi (OMP) into one
 view of what happened, what it cost, and where time went—so you can decide
 whether to continue, intervene, compare, or investigate a run.
 
@@ -64,7 +64,7 @@ troubleshooting, see the [User guide](specs/USER_GUIDE.md).
 ## Coverage
 
 **Runtimes:** Claude Code and Desktop Agent/Cowork, Codex CLI and desktop,
-Cursor Agent/Composer, OpenCode, Kiro, and Pi.
+Cursor Agent/Composer, OpenCode, Kiro, Pi, and Oh My Pi (OMP).
 
 | Platform | Status | Experience |
 | --- | --- | --- |
@@ -204,8 +204,8 @@ costs, or derived analytics. Do not expose the localhost dashboard publicly.
 
 Costs and selected token values can be estimates. Codex cost uses public
 API-equivalent rates, which can differ from subscription billing; Cursor usage
-includes local proxies where authoritative values are unavailable; Pi cost are
-estimates based on model API pricing.
+includes local proxies where authoritative values are unavailable; Pi and OMP
+cost are estimates based on model API pricing.
 
 The optional MCP returns bounded derived evidence, not prompts, responses,
 reasoning, tool contents, credentials, settings, or trace paths. A result sent

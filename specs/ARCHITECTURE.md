@@ -60,7 +60,7 @@ executable and import-compatibility facade; current composition lives in
 Four identities are deliberately independent:
 
 - A **runtime** produced local evidence: Claude Code, Claude Desktop, Codex,
-  Cursor, OpenCode, Kiro, or Pi.
+  Cursor, OpenCode, Kiro, Pi, or Oh My Pi (OMP).
 - A **model provider** owns a model and its public pricing, such as Anthropic or
   OpenAI.
 - An **account provider** may expose quota information through the user's
@@ -108,6 +108,21 @@ including application-profile references, to a safe model label. Pi does not
 establish a context window size, time to first token, semantic token split, or
 cache-savings price, so those projections remain unavailable rather than being
 derived or reported as zero.
+
+The OMP adapter reads only OMP-owned JSONL session files from its own root and
+is intentionally independent from the Pi adapter, so each Pi-family runtime
+keeps explicit format behavior. It accepts an optional fixed-size title entry
+before the required session header, parses the combined `provider/model`
+string OMP records in model-change entries, and reads reasoning tokens from
+`reasoningTokens`. Auxiliary `model_usage` entries are independent billed
+calls in OMP's own session accounting, so each one is projected as exactly one
+additional usage turn with its recorded purpose; conversation usage is never
+recounted from them. Advisor and subagent transcripts live in nested files
+below the discovered roots and are not discovered, which keeps their usage out
+of the main session instead of risking a second count. OMP usage is reported
+under the `omp` runtime identity and remains distinguishable from Pi for the
+same provider and model. Evidence limits, unavailable projections, and
+account-bearing resource redaction match the Pi adapter's rules.
 
 ## Domain and Model Flow
 

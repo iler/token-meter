@@ -1790,6 +1790,7 @@ class CursorTraceTests(unittest.TestCase):
                     mock.patch.object(meter, "KIRO_SESSIONS", str(root / "no-kiro")), \
                     mock.patch.object(meter, "KIRO_AGENT_STORAGE", str(root / "no-kiro-agent")), \
                     mock.patch.object(meter, "PI_AGENT_DIR", str(root / "no-pi-agent")), \
+                    mock.patch.object(meter, "OMP_AGENT_DIR", str(root / "no-omp-agent")), \
                     mock.patch.object(meter, "HERMES_STATE_DB", str(root / "no-hermes.db")), \
                     mock.patch.object(meter, "CLAUDE_DESKTOP_DATA_ROOTS", []), \
                     mock.patch.object(meter, "claude_desktop_index", return_value={}):
@@ -13547,7 +13548,7 @@ class MonthlyBudgetTests(unittest.TestCase):
         self.assertEqual(stored["budgets"]["monthly_total"], 80)
         self.assertEqual(
             stored["budgets"]["allocations"],
-            {"claude": 50, "codex": 30, "cursor": 0, "opencode": 0, "kiro": 0, "pi": 0, "hermes": 0},
+            {"claude": 50, "codex": 30, "cursor": 0, "opencode": 0, "kiro": 0, "pi": 0, "omp": 0, "hermes": 0},
         )
         self.assertIn("model_pricing", stored)
 
@@ -13571,13 +13572,13 @@ class MonthlyBudgetTests(unittest.TestCase):
         self.assertEqual(loaded["monthly_total"], 0)
         self.assertEqual(
             loaded["allocations"],
-            {"claude": 0, "codex": 0, "cursor": 0, "opencode": 0, "kiro": 0, "pi": 0, "hermes": 0},
+            {"claude": 0, "codex": 0, "cursor": 0, "opencode": 0, "kiro": 0, "pi": 0, "omp": 0, "hermes": 0},
         )
         self.assertTrue(saved["ok"])
         self.assertEqual(saved["budgets"]["monthly_total"], 1490)
         self.assertEqual(
             saved["budgets"]["allocations"],
-            {"claude": 0, "codex": 1490, "cursor": 0, "opencode": 0, "kiro": 0, "pi": 0, "hermes": 0},
+            {"claude": 0, "codex": 1490, "cursor": 0, "opencode": 0, "kiro": 0, "pi": 0, "omp": 0, "hermes": 0},
         )
 
     def test_monthly_rollup_keeps_runtime_costs_and_partial_coverage(self):
@@ -13704,9 +13705,9 @@ class PiDocumentationTests(unittest.TestCase):
         architecture = (root / "specs/ARCHITECTURE.md").read_text()
         security = (root / "specs/SECURITY.md").read_text()
 
-        self.assertIn("Pi coding-agent sessions", readme)
-        self.assertIn("Wait time\nis inferred", readme)
-        self.assertIn("semantic token classification", readme)
+        self.assertIn("cost are estimates based on model API pricing", readme)
+        self.assertIn("Wait is inferred", guide)
+        self.assertIn("semantic token classification", guide)
         self.assertIn("PI_CODING_AGENT_DIR", guide)
         self.assertIn("Pi coding-agent sessions", guide)
         self.assertIn("does not import cloud transcripts", guide)
@@ -13966,6 +13967,194 @@ class PiRuntimeTests(unittest.TestCase):
         self.assertEqual(state["total_cost"], 0)
 
 
+class OMPRuntimeTests(unittest.TestCase):
+    """OMP sessions are Pi-family JSONL records with their own runtime identity."""
+
+    def _write_session(self, agent_root, *, provider="anthropic", model="claude-test",
+                       model_usage=None, title_entry=True):
+        directory = Path(agent_root) / "sessions" / "--repo--"
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / "omp-session.jsonl"
+        rows = []
+        if title_entry:
+            rows.append({"type": "title", "v": 1, "title": "Fix the EUR header",
+                         "source": "auto", "pad": " " * 32})
+        rows.extend([
+            {"type": "session", "version": 3, "id": "omp-session",
+             "timestamp": "2026-09-19T10:00:00Z", "cwd": "/repo",
+             "title": "Fix the EUR header"},
+            {"type": "model_change", "id": "model-change", "parentId": None,
+             "timestamp": "2026-09-19T10:00:01Z",
+             "model": "{}/{}".format(provider, model)},
+            {"type": "message", "id": "user", "parentId": "model-change",
+             "timestamp": "2026-09-19T10:00:02Z",
+             "message": {"role": "user", "content": []}},
+            {"type": "message", "id": "assistant", "parentId": "user",
+             "timestamp": "2026-09-19T10:00:05Z", "message": {
+                "role": "assistant", "model": model, "provider": provider,
+                "content": [{"type": "toolCall", "id": "call", "name": "read",
+                             "arguments": {"path": "/repo/private-plan"}}],
+                "usage": {"input": 100, "output": 20, "cacheRead": 10,
+                          "cacheWrite": 5, "totalTokens": 135, "reasoningTokens": 4,
+                          "cost": {"input": 0.001, "output": 0.002,
+                                   "cacheRead": 0.0001, "cacheWrite": 0.0002}},
+             }},
+            {"type": "message", "id": "result", "parentId": "assistant",
+             "timestamp": "2026-09-19T10:00:06Z",
+             "message": {"role": "toolResult", "toolCallId": "call", "toolName": "read"}},
+        ])
+        if model_usage is not None:
+            rows.append(model_usage)
+        path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+        return path
+
+    @staticmethod
+    def _model_usage_row():
+        return {
+            "type": "model_usage", "id": "aux-1", "parentId": "assistant",
+            "timestamp": "2026-09-19T10:00:07Z",
+            "purpose": "auto-thinking", "role": "tiny", "api": "openai-completions",
+            "provider": "openai", "model": "gpt-judge", "stopReason": "stop",
+            "usage": {"input": 7, "output": 3, "cacheRead": 0, "cacheWrite": 0,
+                      "totalTokens": 10,
+                      "cost": {"input": 0.0007, "output": 0.0003,
+                               "cacheRead": 0.0, "cacheWrite": 0.0}},
+        }
+
+    def test_discovers_and_projects_omp_usage_under_its_own_runtime_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "agent"
+            self._write_session(root)
+            with mock.patch.object(meter, "OMP_AGENT_DIR", str(root)), \
+                    mock.patch.object(meter, "_omp_native_adapters", {}), \
+                    mock.patch.object(meter, "_RUNTIME_REGISTRY", None):
+                sources = meter.omp_session_sources()
+                state = meter.recompute(sources[0])
+                summary = meter.omp_summary(sources[0])
+
+        self.assertEqual(len(sources), 1)
+        self.assertEqual(sources[0]["provider"], "omp")
+        self.assertEqual(sources[0]["client"], "omp")
+        self.assertEqual(sources[0]["label"], "Oh My Pi")
+        self.assertEqual(sources[0]["runtime"], "Oh My Pi")
+        self.assertEqual(sources[0]["title"], "Fix the EUR header")
+        self.assertEqual(sources[0]["model"], "claude-test")
+        self.assertEqual(sources[0]["model_provider"], "anthropic")
+        self.assertEqual(sources[0]["project"], "/repo")
+        self.assertEqual(state["tokens"], {
+            "input": 100, "cache_write": 5, "cache_read": 10, "output": 20,
+        })
+        self.assertEqual(state["total_tokens"], 135)
+        self.assertAlmostEqual(state["total_cost"], 0.0033)
+        self.assertTrue(state["cost_approx"])
+        self.assertFalse(state["semantic_available"])
+        self.assertEqual(state["executions"][0]["tools"][0]["name"], "read")
+        self.assertEqual(state["executions"][0]["reasoning_tokens"], 4)
+        self.assertEqual(summary["provider"], "omp")
+        self.assertEqual(summary["tokens"], 135)
+        self.assertNotIn("private-plan", json.dumps(state))
+        self.assertNotIn("arguments", json.dumps(state))
+
+    def test_omp_and_pi_stay_distinguishable_for_the_same_model(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            omp_root = Path(tmp) / "omp-agent"
+            pi_root = Path(tmp) / "pi-agent"
+            self._write_session(omp_root)
+            pi_directory = pi_root / "sessions" / "--repo--"
+            pi_directory.mkdir(parents=True)
+            (pi_directory / "pi-session.jsonl").write_text("\n".join(json.dumps(row) for row in [
+                {"type": "session", "version": 1, "id": "pi-session",
+                 "timestamp": "2026-09-19T10:00:00Z", "cwd": "/repo"},
+                {"type": "message", "id": "assistant",
+                 "timestamp": "2026-09-19T10:00:05Z", "message": {
+                    "role": "assistant", "model": "claude-test", "provider": "anthropic",
+                    "content": [],
+                    "usage": {"input": 1, "output": 1, "cacheRead": 0, "cacheWrite": 0,
+                              "totalTokens": 2,
+                              "cost": {"input": 0.001, "output": 0.001,
+                                       "cacheRead": 0.0, "cacheWrite": 0.0}},
+                 }},
+            ]) + "\n")
+            with mock.patch.object(meter, "OMP_AGENT_DIR", str(omp_root)), \
+                    mock.patch.object(meter, "PI_AGENT_DIR", str(pi_root)), \
+                    mock.patch.object(meter, "_omp_native_adapters", {}), \
+                    mock.patch.object(meter, "_pi_native_adapters", {}), \
+                    mock.patch.object(meter, "_RUNTIME_REGISTRY", None):
+                omp_source = meter.omp_session_sources()[0]
+                pi_source = meter.pi_session_sources()[0]
+
+        self.assertEqual(omp_source["provider"], "omp")
+        self.assertEqual(pi_source["provider"], "pi")
+        self.assertEqual(omp_source["model"], pi_source["model"])
+        self.assertNotEqual(omp_source["id"], pi_source["id"])
+        self.assertNotEqual(omp_source["label"], pi_source["label"])
+
+    def test_includes_auxiliary_model_usage_exactly_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "agent"
+            self._write_session(root, model_usage=self._model_usage_row())
+            with mock.patch.object(meter, "OMP_AGENT_DIR", str(root)), \
+                    mock.patch.object(meter, "_omp_native_adapters", {}), \
+                    mock.patch.object(meter, "_RUNTIME_REGISTRY", None):
+                source = meter.omp_session_sources()[0]
+                state = meter.recompute(source)
+                summary = meter.omp_summary(source)
+
+        # Conversation 135 tokens plus the auxiliary call's 10, each once.
+        self.assertEqual(state["total_tokens"], 145)
+        self.assertEqual(state["tokens"], {
+            "input": 107, "cache_write": 5, "cache_read": 10, "output": 23,
+        })
+        self.assertAlmostEqual(state["total_cost"], 0.0043)
+        self.assertEqual(len(state["executions"]), 2)
+        auxiliary = state["executions"][1]
+        self.assertEqual(auxiliary["purpose"], "auto-thinking")
+        self.assertEqual(auxiliary["model_calls"], 1)
+        self.assertEqual(auxiliary["tokens"]["total"], 10)
+        self.assertIn("auto-thinking", auxiliary["summary"])
+        models = {row["model"]: row["tokens"] for row in summary["model_stats"]}
+        self.assertEqual(models["gpt-judge"], 10)
+        self.assertEqual(models["claude-test"], 135)
+
+    def test_omp_cost_stays_a_local_estimate_without_a_price_lookup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "agent"
+            self._write_session(root)
+            with mock.patch.object(meter, "OMP_AGENT_DIR", str(root)), \
+                    mock.patch.object(meter, "_omp_native_adapters", {}), \
+                    mock.patch.object(meter, "_RUNTIME_REGISTRY", None):
+                source = meter.omp_session_sources()[0]
+                with mock.patch.object(
+                    meter, "price_for",
+                    side_effect=AssertionError("OMP must not infer cache savings from pricing"),
+                ):
+                    state = meter.recompute(source)
+
+        self.assertFalse(state["cache"]["savings_available"])
+        self.assertIsNone(state["cache"]["saved"])
+
+    def test_pi_rejects_title_prefixed_omp_sessions_unchanged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "agent"
+            self._write_session(root)
+            with mock.patch.object(meter, "PI_AGENT_DIR", str(root)), \
+                    mock.patch.object(meter, "_pi_native_adapters", {}):
+                self.assertEqual(meter.pi_session_sources(), [])
+
+
+class OMPDocumentationTests(unittest.TestCase):
+    def test_docs_explain_omp_evidence_and_privacy_boundaries(self):
+        root = Path(__file__).resolve().parents[1]
+        readme = (root / "README.md").read_text()
+        guide = (root / "specs/USER_GUIDE.md").read_text()
+        architecture = (root / "specs/ARCHITECTURE.md").read_text()
+
+        self.assertIn("Oh My Pi (OMP)", readme)
+        self.assertIn("OMP_CODING_AGENT_DIR", guide)
+        self.assertIn("Oh My Pi (OMP) sessions", guide)
+        self.assertIn("OMP adapter", architecture)
+
+
 class OpenCodeTests(unittest.TestCase):
     """OpenCode is discovered from its read-only SQLite database."""
 
@@ -14060,6 +14249,7 @@ class OpenCodeTests(unittest.TestCase):
                     mock.patch.object(meter, "KIRO_SESSIONS", str(root / "no-kiro")), \
                     mock.patch.object(meter, "KIRO_AGENT_STORAGE", str(root / "no-kiro-agent")), \
                     mock.patch.object(meter, "PI_AGENT_DIR", str(root / "no-pi-agent")), \
+                    mock.patch.object(meter, "OMP_AGENT_DIR", str(root / "no-omp-agent")), \
                     mock.patch.object(meter, "HERMES_STATE_DB", str(root / "no-hermes.db")), \
                     mock.patch.object(meter, "CLAUDE_DESKTOP_DATA_ROOTS", []), \
                     mock.patch.object(meter, "claude_desktop_index", return_value={}):
